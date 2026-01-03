@@ -18,7 +18,9 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
     DispatchQueue.global(qos: .userInteractive).async {
-        usleep(100000) // 0.1s delay for text rendering
+        // OPTIMIZATION: Reduced latency from 0.1s (100000) to 0.01s (10000)
+        // This minimizes the time the system banner is visible before we kill it.
+        usleep(10000)
         monitor.handleNewNotification(element: element)
     }
 }
@@ -107,112 +109,102 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
+        // 1. FAST READ: Grab text immediately
         let (title, body) = extractText(from: element)
         
+        // 2. FAST KILL: Trigger dismissal immediately on background thread
+        // We don't wait for UI updates to finish before killing the system banner.
+        DispatchQueue.global(qos: .userInteractive).async {
+            self.attemptDismiss(element: element)
+        }
+        
+        // 3. UPDATE UI: Show our custom banner
         if !title.isEmpty || !body.isEmpty {
             DispatchQueue.main.async {
                 print("🔔 Captured: \(title) - \(body)")
                 self.latestNotification = CapturedNotification(title: title, body: body, appName: "System")
             }
-            
-            self.attemptDismiss(element: element)
         }
     }
     
-    // UPDATED: Dismissal with ACTION INSPECTION
+    // OPTIMIZED: Faster dismissal by targeting the specific banner component
     private func attemptDismiss(element: AXUIElement) {
-        // Strategy 1: Check for the Standard Window Close Button Attribute
-        var closeButtonRef: AnyObject?
-        let result = AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &closeButtonRef)
-        
-        if result == .success, let closeButton = closeButtonRef {
-            let closeEl = closeButton as! AXUIElement
-            print("   🎯 Found Standard Close Button via Attribute.")
-            performPress(element: closeEl)
-            return
-        }
-        
-        // Strategy 2: Deep recursive crawl looking for Actions
-        print("   ⚠️ Standard attribute failed. Scanning for Actions & Hidden buttons...")
-        crawlAndDismiss(element, depth: 0)
+        // Perform a targeted crawl. We know the "Close" action lives on the 'AXNotificationCenterBanner'
+        // or a child with 'AXCloseButton'. We stop as soon as we succeed.
+        _ = fastCrawlAndDismiss(element, depth: 0)
     }
 
     private func performPress(element: AXUIElement) {
-        let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
-        if error == .success {
-            print("   ✨ Dismissed successfully (AXPress)")
-        } else {
-            print("   ⚠️ Failed to press: \(error.rawValue)")
-        }
+        _ = AXUIElementPerformAction(element, kAXPressAction as CFString)
     }
     
     private func performCancel(element: AXUIElement) {
-        let error = AXUIElementPerformAction(element, kAXCancelAction as CFString)
-        if error == .success {
-            print("   ✨ Dismissed successfully (AXCancel)")
-        } else {
-            print("   ⚠️ Failed to cancel: \(error.rawValue)")
-        }
+        _ = AXUIElementPerformAction(element, kAXCancelAction as CFString)
     }
 
-    private func crawlAndDismiss(_ el: AXUIElement, depth: Int) {
+    // Returns true if dismissed, to stop further searching
+    private func fastCrawlAndDismiss(_ el: AXUIElement, depth: Int) -> Bool {
+        // Optimization: Don't go too deep
+        if depth > 5 { return false }
+
         var children: AnyObject?
         let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
-        
-        guard res == .success, let list = children as? [AXUIElement] else {
-            return
-        }
+        guard res == .success, let list = children as? [AXUIElement] else { return false }
         
         for child in list {
-            var role: AnyObject?
-            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
-            let roleStr = role as? String ?? "Unknown"
-            
             var subrole: AnyObject?
             AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
             let subroleStr = subrole as? String ?? ""
 
-            // DEBUG LOGGING: Show the tree structure
-            let indent = String(repeating: " ", count: depth * 2)
-            print("\(indent)➡️ [\(roleStr)] Subrole:'\(subroleStr)'")
-            
-            // CHECK ACTIONS
+            // CHECK ACTIONS (Priority)
+            // We check actions on every node because sometimes the wrapper has the action
             var actionNames: CFArray?
             AXUIElementCopyActionNames(child, &actionNames)
+            
             if let names = actionNames as? [String] {
-                print("\(indent)   ⚡️ Actions: \(names)")
-                
-                // STRATEGY UPDATE: Look for ANY action containing "Close"
-                // Your logs showed: "Name:Close\nTarget:0x0..."
+                // 1. Look for explicit "Close" action (found in logs earlier)
                 if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
-                    print("\(indent)   🔥 Found Explicit Close Action: '\(closeAction)'")
                     let err = AXUIElementPerformAction(child, closeAction as CFString)
-                    if err == .success {
-                        print("\(indent)   ✨ Executed Close Action Successfully!")
-                        return
-                    } else {
-                         print("\(indent)   ⚠️ Failed to execute action: \(err.rawValue)")
-                    }
+                    if err == .success { return true }
                 }
                 
-                // Fallback: AXCancel
+                // 2. Look for Cancel
                 if names.contains("AXCancel") {
-                    print("\(indent)   🔥 Found AXCancel! Executing...")
                     performCancel(element: child)
-                    // Don't return here immediately, in case the explicit Close is better
+                    return true
                 }
             }
 
-            // CHECK 1: Explicit AXCloseButton
-            if (roleStr == "AXButton" && subroleStr == "AXCloseButton") {
-                print("\(indent)   🔥 MATCH! Clicking Button...")
-                performPress(element: child)
-                return
+            // CHECK SUBROLE (Targeting the Banner Group)
+            // If this is the banner, and we haven't found a named action, try blind cancel
+            if subroleStr == "AXNotificationCenterBanner" {
+                // Attempt blind cancel just in case
+                let err = AXUIElementPerformAction(child, kAXCancelAction as CFString)
+                if err == .success { return true }
+            }
+            
+            // CHECK BUTTONS (Traditional Close Button)
+            var role: AnyObject?
+            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+            let roleStr = role as? String ?? ""
+            
+            if roleStr == "AXButton" {
+                var title: AnyObject?
+                AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
+                let titleStr = title as? String ?? ""
+                
+                if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
+                    performPress(element: child)
+                    return true
+                }
             }
             
             // Recurse
-            crawlAndDismiss(child, depth: depth + 1)
+            if fastCrawlAndDismiss(child, depth: depth + 1) {
+                return true
+            }
         }
+        return false
     }
     
     private func extractText(from element: AXUIElement) -> (String, String) {
