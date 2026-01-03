@@ -74,6 +74,7 @@ struct ContentView: View {
         .onChange(of: monitor.latestNotification) { newValue in
             guard let newNotif = newValue else { return }
             print("[ContentView] Received: \(newNotif.title)")
+            print("[ContentView] Icon status: \(newNotif.icon == nil ? "MISSING" : "FOUND")")
             // Trigger the Dynamic Island
             windowManager.showNotification(newNotif)
         }

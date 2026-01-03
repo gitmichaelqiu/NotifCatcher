@@ -9,7 +9,7 @@ struct CapturedNotification: Identifiable, Equatable {
     let title: String
     let body: String
     let appName: String
-    let icon: NSImage? // Added icon support
+    let icon: NSImage?
     let timestamp = Date()
 }
 
@@ -19,7 +19,8 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
     DispatchQueue.global(qos: .userInteractive).async {
-        usleep(100000) // 100ms delay for UI population
+        // Increased delay to 0.15s to ensure full accessibility tree population
+        usleep(150000)
         monitor.handleNewNotification(element: element)
     }
 }
@@ -95,11 +96,9 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
-        // Extract content including App Name
         let content = scanAndDismiss(element)
         
         if !content.title.isEmpty || !content.body.isEmpty {
-            // Resolve Icon
             let icon = resolveAppIcon(appName: content.appName)
             
             DispatchQueue.main.async {
@@ -115,25 +114,30 @@ class NotificationMonitor: ObservableObject {
     }
     
     private func resolveAppIcon(appName: String) -> NSImage? {
-        guard !appName.isEmpty, appName != "System" else { return nil }
+        print("[IconDebug] Resolving icon for appName: '\(appName)'")
         
-        // 1. Try to find running app by exact name
+        guard !appName.isEmpty, appName != "System" else {
+            print("[IconDebug] AppName is System/Empty. Skipping.")
+            return nil
+        }
+        
+        // 1. Exact Match
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }) {
             return app.icon
         }
         
-        // 2. Try to find running app by case-insensitive name
+        // 2. Case-Insensitive
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName?.localizedCaseInsensitiveContains(appName) == true }) {
             return app.icon
         }
         
-        // 3. Try standard Application paths (Manual lookup)
-        // This helps if the app isn't currently "running" in a way NSWorkspace sees easily, or if the name matches a file
+        // 3. Manual Path Check
         let fileManager = FileManager.default
         let commonPaths = [
             "/Applications/\(appName).app",
             "/System/Applications/\(appName).app",
-            "/System/Applications/Utilities/\(appName).app"
+            "/System/Applications/Utilities/\(appName).app",
+            "/Users/\(NSUserName())/Applications/\(appName).app"
         ]
         
         for path in commonPaths {
@@ -145,58 +149,125 @@ class NotificationMonitor: ObservableObject {
         return nil
     }
     
-    // Updated scanner to find App Name via Image Description
     private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String) {
         var titles: [String] = []
         var detectedAppName: String = "System"
         var pendingDismissal: (() -> Void)? = nil
 
+        // Check Root Window Title
+        var windowTitle: AnyObject?
+        AXUIElementCopyAttributeValue(root, kAXTitleAttribute as CFString, &windowTitle)
+        if let wTitle = windowTitle as? String {
+             print("[TreeDebug] Root Window Title: '\(wTitle)'")
+            if wTitle != "Notification Center" && wTitle != "Window" && !wTitle.isEmpty {
+                 detectedAppName = wTitle
+            }
+        }
+
         func crawl(_ el: AXUIElement, depth: Int) {
-            if depth > 5 { return }
+            if depth > 8 { return }
 
             var children: AnyObject?
             let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
             guard res == .success, let list = children as? [AXUIElement] else { return }
 
             for child in list {
-                // 1. Attributes
+                // 1. Role & Subrole
                 var role: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
-                let roleStr = role as? String ?? ""
+                let roleStr = role as? String ?? "Unknown"
+                
+                var subrole: AnyObject?
+                AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
+                let subroleStr = subrole as? String ?? ""
 
-                // 2. Text
+                // ENABLED DEBUG PRINT FOR DIAGNOSIS
+                print("[TreeDebug] Depth: \(depth) | Role: \(roleStr) | Subrole: \(subroleStr)")
+
+                // 2. Text Content
                 if roleStr == "AXStaticText" {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
+                        print("[TreeDebug]    -> Text Value: '\(text)'")
                         titles.append(text)
                     }
                 }
                 
-                // 3. App Name (via Icon Description)
+                // 3. App Name Detection Strategy
+                
+                // Strategy A: AXImage Description or Title
                 if roleStr == "AXImage" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
                     if let descStr = desc as? String, !descStr.isEmpty {
+                        print("[IconDebug] Found AXImage Description: '\(descStr)'")
+                        detectedAppName = descStr
+                    }
+                    
+                    var title: AnyObject?
+                    AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
+                    if let titleStr = title as? String, !titleStr.isEmpty {
+                        print("[IconDebug] Found AXImage Title: '\(titleStr)'")
+                        if detectedAppName == "System" { detectedAppName = titleStr }
+                    }
+                }
+                
+                // Strategy B: AXButton Description/Title
+                if roleStr == "AXButton" {
+                    var desc: AnyObject?
+                    AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
+                    if let descStr = desc as? String, !descStr.isEmpty, descStr != "Close", descStr != "Clear", descStr != "Actions" {
+                        print("[IconDebug] Found AXButton Description: '\(descStr)'")
                         detectedAppName = descStr
                     }
                 }
-
-                // 4. Dismissal Logic (Identify but don't execute yet)
-                if pendingDismissal == nil {
-                    var subrole: AnyObject?
-                    AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
-                    let subroleStr = subrole as? String ?? ""
-
-                    if subroleStr == "AXNotificationCenterBanner" || roleStr == "AXGroup" || roleStr == "AXButton" {
-                        var actionNames: CFArray?
-                        AXUIElementCopyActionNames(child, &actionNames)
-                        if let names = actionNames as? [String] {
-                            if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
-                                pendingDismissal = { _ = AXUIElementPerformAction(child, closeAction as CFString) }
-                            } else if names.contains("AXCancel") {
-                                pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
+                
+                // Strategy C: AXGroup Description (UPDATED to parse "AppName, Title, Body")
+                if roleStr == "AXGroup" {
+                    var desc: AnyObject?
+                    AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
+                    if let descStr = desc as? String, !descStr.isEmpty {
+                        print("[GroupDebug] AXGroup Description: '\(descStr)'")
+                        
+                        // Case 1: "Notification from AppName"
+                        if descStr.hasPrefix("Notification from ") {
+                            detectedAppName = String(descStr.dropFirst(18))
+                        }
+                        // Case 2: "AppName, Title, Body" (matches "Discord, MickyMike, wowowow")
+                        else if descStr.contains(", ") {
+                            let components = descStr.components(separatedBy: ", ")
+                            // Heuristic: The first component is likely the App Name
+                            if let first = components.first, !first.isEmpty {
+                                detectedAppName = first
                             }
+                        }
+                    }
+                }
+
+                // 4. Dismissal Logic
+                if pendingDismissal == nil {
+                    var actionNames: CFArray?
+                    AXUIElementCopyActionNames(child, &actionNames)
+                    
+                    if let names = actionNames as? [String] {
+                         if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
+                             pendingDismissal = { _ = AXUIElementPerformAction(child, closeAction as CFString) }
+                         } else if names.contains("AXCancel") {
+                             pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
+                         }
+                    }
+                    
+                    if pendingDismissal == nil && subroleStr == "AXNotificationCenterBanner" {
+                         pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
+                    }
+                    
+                    if pendingDismissal == nil && roleStr == "AXButton" {
+                        var title: AnyObject?
+                        AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
+                        let titleStr = title as? String ?? ""
+                        if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
+                            pendingDismissal = { _ = AXUIElementPerformAction(child, kAXPressAction as CFString) }
                         }
                     }
                 }
@@ -207,9 +278,6 @@ class NotificationMonitor: ObservableObject {
         
         crawl(root, depth: 0)
         
-        // EXECUTE KILL with Delay
-        // We delay the dismissal by 0.6 seconds.
-        // This allows the system sound to trigger and play before we remove the notification window.
         if let dismissal = pendingDismissal {
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) {
                 dismissal()
