@@ -201,18 +201,17 @@ class NotificationMonitor: ObservableObject {
     }
 
     private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String, profileElement: AXUIElement?) {
-        // FILTER: Ignore large windows (Notification Center Side Panel)
-        // Banners are typically short (~80-150px). The Notification Center list is full screen height.
-        if let frame = getElementFrame(root), frame.height > 600 {
-            print("[Filter] Ignoring large window (Height: \(frame.height)). Likely Notification Center history.")
-            return ("", "", "", nil)
-        }
-
+        // FILTER REMOVED: The height check (> 600) was blocking valid banner notifications
+        // because the root window for banners can also report full screen height (e.g. 982.0).
+        
         var titles: [String] = []
         var detectedAppName: String = "System"
         var candidateProfileElement: AXUIElement? = nil
         var pendingDismissal: (() -> Void)? = nil
         
+        // Flag to detect if we are looking at the History Panel (Dashboard)
+        var isHistoryPanel = false
+
         var windowTitle: AnyObject?
         AXUIElementCopyAttributeValue(root, kAXTitleAttribute as CFString, &windowTitle)
         if let wTitle = windowTitle as? String {
@@ -222,7 +221,7 @@ class NotificationMonitor: ObservableObject {
         }
 
         func crawl(_ el: AXUIElement, depth: Int) {
-            if depth > 10 { return }
+            if depth > 10 || isHistoryPanel { return }
 
             var children: AnyObject?
             let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
@@ -243,6 +242,16 @@ class NotificationMonitor: ObservableObject {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
+                        // HEURISTIC: Detect Notification Center History Panel
+                        // The History panel displays specific headers/footers not found in banners.
+                        if text == "Notification Center" ||
+                           text == "No Notifications" ||
+                           text == "Do Not Disturb" ||
+                           text == "Edit Widgets" ||
+                           text == "Widgets" {
+                            isHistoryPanel = true
+                            return
+                        }
                         titles.append(text)
                     }
                 }
@@ -316,11 +325,28 @@ class NotificationMonitor: ObservableObject {
         
         crawl(root, depth: 0)
         
+        // If identified as history panel, abort immediately
+        if isHistoryPanel {
+            return ("", "", "", nil)
+        }
+
+        // HEURISTIC: If the first title found is "Notification Center", it's the header, not a notification title.
+        let t = titles.first ?? "New Notification"
+        if t == "Notification Center" {
+            return ("", "", "", nil)
+        }
+        
+        // HEURISTIC: If we found content but NO way to dismiss it, it's likely a persistent window (like the History panel)
+        // rather than a transient banner. We should only capture dismissible alerts.
+        if pendingDismissal == nil {
+            return ("", "", "", nil)
+        }
+        
+        // Execute dismissal
         if let dismissal = pendingDismissal {
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { dismissal() }
         }
         
-        let t = titles.first ?? "New Notification"
         let b = titles.count > 1 ? titles[1] : ""
         return (t, b, detectedAppName, candidateProfileElement)
     }
