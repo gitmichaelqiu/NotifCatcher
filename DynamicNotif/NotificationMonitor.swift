@@ -20,7 +20,7 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     DispatchQueue.global(qos: .userInteractive).async {
         // DELAY FIX: The system needs a tiny moment to populate the text fields
         // inside the new window. 20ms is the sweet spot (undetectable lag, reliable data).
-        usleep(20000)
+        usleep(100000)
         monitor.handleNewNotification(element: element)
     }
 }
