@@ -71,7 +71,8 @@ class FloatingNotificationManager: ObservableObject {
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = false
-        p.level = .floating // Float above normal windows
+        // Use a very high window level to float above almost everything (matching Boring Notch)
+        p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 3)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         self.panel = p
@@ -107,6 +108,7 @@ class FloatingNotificationManager: ObservableObject {
             let visibleFrame = screen.visibleFrame
             // Position from right, near the top (flush below menu bar)
             // visibleFrame.maxY is the bottom edge of the menu bar.
+            // We set X to match the right side padding.
             let xPos = visibleFrame.maxX - 400 // Width + Padding
             let yPos = visibleFrame.maxY - 120  // Height of our window (120)
             
@@ -151,6 +153,14 @@ struct DynamicIslandContainer: View {
     }
     
     var isExpanded: Bool { islandState == .expanded }
+    
+    // Animation constants matching Boring Notch physics
+    private let openAnimation = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.8, blendDuration: 0)
+    private let closeAnimation = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
+    
+    // Boring Notch specific geometry
+    private var topRadius: CGFloat { isExpanded ? 19 : 6 }
+    private var bottomRadius: CGFloat { isExpanded ? 24 : 14 }
     
     var body: some View {
         // The view itself is transparent, holding the island
@@ -206,14 +216,20 @@ struct DynamicIslandContainer: View {
             }
             .padding(.horizontal, isExpanded ? 14 : 0)
             .padding(.vertical, isExpanded ? 14 : 0)
-            // STYLE UPDATE: Start very small (width 60, height 0) to mimic expanding from the bar
-            .frame(width: isExpanded ? 340 : 60, height: isExpanded ? 80 : 0)
+            // STYLE UPDATE: Start tiny (width 100, height 0) at the very top edge
+            .frame(width: isExpanded ? 340 : 100, height: isExpanded ? 80 : 0)
             .background(
-                Color.black // Solid black as requested
-                    .shadow(color: .black.opacity(0.4), radius: 12, x: 0, y: 4)
+                ZStack {
+                    // Main black background
+                    Color.black
+                    // Subtle border overlay
+                    NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1.5)
+                }
+                .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 5)
             )
-            // STYLE UPDATE: Animate corner radius to look like it morphs out
-            .clipShape(RoundedRectangle(cornerRadius: isExpanded ? 22 : 4, style: .continuous))
+            // STYLE UPDATE: Use Custom NotchShape for the clip
+            .clipShape(NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius))
             .padding(.top, 0) // TOUCH THE MENU BAR (No gap)
             .padding(.trailing, 16) // Padding from the right screen edge
             .onTapGesture {
@@ -228,14 +244,13 @@ struct DynamicIslandContainer: View {
             // Sequence the animation
             
             // 1. Fade In
-            withAnimation(.easeIn(duration: 0.15)) {
+            withAnimation(.easeIn(duration: 0.1)) {
                 viewOpacity = 1.0
             }
             
-            // 2. Expand
-            // Small delay to ensure the opacity has started before expanding
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                withAnimation(.interactiveSpring(response: 0.5, dampingFraction: 0.7, blendDuration: 0.2)) {
+            // 2. Expand with custom physics
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                withAnimation(openAnimation) {
                     islandState = .expanded
                 }
             }
@@ -251,13 +266,12 @@ struct DynamicIslandContainer: View {
     private func dismiss() {
         print("[Debug] Dismiss animation started for ID: \(notification.id)")
         // 1. Shrink Animation
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+        withAnimation(closeAnimation) {
             islandState = .idle
         }
         
         // 2. Fade Out Animation (Simultaneous)
-        // Removing the delay ensures that if it shrinks to a capsule, it's already invisible
-        withAnimation(.easeOut(duration: 0.25)) {
+        withAnimation(.easeOut(duration: 0.2)) {
             viewOpacity = 0
         }
         
@@ -265,5 +279,57 @@ struct DynamicIslandContainer: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             onDismiss()
         }
+    }
+}
+
+// MARK: - Notch Shape (Exact Copy from Boring Notch)
+struct NotchShape: Shape {
+    var topCornerRadius: CGFloat
+    var bottomCornerRadius: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get {
+            .init(topCornerRadius, bottomCornerRadius)
+        }
+        set {
+            topCornerRadius = newValue.first
+            bottomCornerRadius = newValue.second
+        }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + topCornerRadius, y: rect.minY + topCornerRadius),
+            control: CGPoint(x: rect.minX + topCornerRadius, y: rect.minY)
+        )
+
+        path.addLine(to: CGPoint(x: rect.minX + topCornerRadius, y: rect.maxY - bottomCornerRadius))
+
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + topCornerRadius + bottomCornerRadius, y: rect.maxY),
+            control: CGPoint(x: rect.minX + topCornerRadius, y: rect.maxY)
+        )
+
+        path.addLine(to: CGPoint(x: rect.maxX - topCornerRadius - bottomCornerRadius, y: rect.maxY))
+
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX - topCornerRadius, y: rect.maxY - bottomCornerRadius),
+            control: CGPoint(x: rect.maxX - topCornerRadius, y: rect.maxY)
+        )
+
+        path.addLine(to: CGPoint(x: rect.maxX - topCornerRadius, y: rect.minY + topCornerRadius))
+
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY),
+            control: CGPoint(x: rect.maxX - topCornerRadius, y: rect.minY)
+        )
+
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+
+        return path
     }
 }
