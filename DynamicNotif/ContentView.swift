@@ -71,7 +71,7 @@ struct ContentView: View {
             Spacer()
         }
         .frame(minWidth: 400, minHeight: 350)
-        .onChange(of: monitor.latestNotification) { newValue in
+        .onChange(of: monitor.latestNotification) { newValue, _ in
             guard let newNotif = newValue else { return }
             print("[ContentView] Received: \(newNotif.title)")
             windowManager.showNotification(newNotif)
@@ -85,7 +85,7 @@ class FloatingNotificationManager: ObservableObject {
     private var currentNotificationId: UUID?
     
     // Config: Position logic for Top Right
-    // We use a wider window (450) to hold the 360px content + shadows (radius 15) without clipping.
+    // We use a wider window (450) to hold the 380px content + shadows (radius 15) without clipping.
     private let windowWidth: CGFloat = 450
     private let windowHeight: CGFloat = 200
     
@@ -120,13 +120,13 @@ class FloatingNotificationManager: ObservableObject {
             let visibleFrame = screen.visibleFrame
             
             // VISUAL CALCULATION:
-            // Target: Visual content (360px) should be 21px from Right Edge.
+            // Target: Visual content (380px) should be 21px from Right Edge.
             // Window Width: 450px.
-            // Content is centered in Window -> Side Margins = (450 - 360) / 2 = 45px.
+            // Content is centered in Window -> Side Margins = (450 - 380) / 2 = 35px.
             // Desired Visual Right Gap = 21.
-            // Window Right Gap = Desired Visual Gap - Side Margin = 21 - 45 = -24.
-            // (Negative padding means the transparent window frame extends 24px off-screen to the right)
-            let rightPadding: CGFloat = -24
+            // Window Right Gap = Desired Visual Gap - Side Margin = 21 - 35 = -14.
+            // (Negative padding means the transparent window frame extends 14px off-screen to the right)
+            let rightPadding: CGFloat = -35
             
             let xPos = visibleFrame.maxX - windowWidth - rightPadding
             let yPos = visibleFrame.maxY - windowHeight
@@ -182,7 +182,7 @@ struct DynamicIslandContainer: View {
     private let startWidth: CGFloat = 20
     private let startHeight: CGFloat = 0
     
-    // User Specification: Width 360
+    // User Specification: Width 380
     private let expandedWidth: CGFloat = 380
     private let expandedHeight: CGFloat = 84
     
