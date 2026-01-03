@@ -200,7 +200,8 @@ struct DynamicIslandContainer: View {
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
                                 .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
-                                .clipShape(Circle())
+                                // UPDATED: Rounded Square Shape for App Icon
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 .opacity(isExpanded ? 1 : 0)
                         } else {
                             // Fallback Icon

@@ -117,14 +117,29 @@ class NotificationMonitor: ObservableObject {
     private func resolveAppIcon(appName: String) -> NSImage? {
         guard !appName.isEmpty, appName != "System" else { return nil }
         
-        // 1. Try to find running app by name
+        // 1. Try to find running app by exact name
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }) {
             return app.icon
         }
         
-        // 2. Try to find app path by name
-        if let path = NSWorkspace.shared.fullPath(forApplication: appName) {
-            return NSWorkspace.shared.icon(forFile: path)
+        // 2. Try to find running app by case-insensitive name
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName?.localizedCaseInsensitiveContains(appName) == true }) {
+            return app.icon
+        }
+        
+        // 3. Try standard Application paths (Manual lookup)
+        // This helps if the app isn't currently "running" in a way NSWorkspace sees easily, or if the name matches a file
+        let fileManager = FileManager.default
+        let commonPaths = [
+            "/Applications/\(appName).app",
+            "/System/Applications/\(appName).app",
+            "/System/Applications/Utilities/\(appName).app"
+        ]
+        
+        for path in commonPaths {
+            if fileManager.fileExists(atPath: path) {
+                return NSWorkspace.shared.icon(forFile: path)
+            }
         }
         
         return nil
@@ -159,7 +174,6 @@ class NotificationMonitor: ObservableObject {
                 }
                 
                 // 3. App Name (via Icon Description)
-                // macOS notifications usually contain an AXImage where the description is the App Name
                 if roleStr == "AXImage" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
@@ -168,7 +182,7 @@ class NotificationMonitor: ObservableObject {
                     }
                 }
 
-                // 4. Dismissal Logic (Same as before)
+                // 4. Dismissal Logic (Identify but don't execute yet)
                 if pendingDismissal == nil {
                     var subrole: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
@@ -192,7 +206,15 @@ class NotificationMonitor: ObservableObject {
         }
         
         crawl(root, depth: 0)
-        pendingDismissal?()
+        
+        // EXECUTE KILL with Delay
+        // We delay the dismissal by 0.6 seconds.
+        // This allows the system sound to trigger and play before we remove the notification window.
+        if let dismissal = pendingDismissal {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) {
+                dismissal()
+            }
+        }
         
         let t = titles.first ?? "New Notification"
         let b = titles.count > 1 ? titles[1] : ""
