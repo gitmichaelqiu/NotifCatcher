@@ -142,11 +142,12 @@ class FloatingNotificationManager: ObservableObject {
     
     private func hidePanel() {
         print("[WindowManager] Hiding panel and disabling clicks")
-        // DEACTIVATE: Completely remove window from screen
-        // This ensures it cannot intercept clicks
-        panel?.orderOut(nil)
-        panel?.alphaValue = 0
-        panel?.ignoresMouseEvents = true
+        guard let panel = self.panel else { return }
+        
+        panel.alphaValue = 0
+        panel.ignoresMouseEvents = true
+        
+        panel.orderOut(nil)
     }
 }
 
