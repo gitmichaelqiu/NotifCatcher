@@ -45,6 +45,7 @@ struct ContentView: View {
         // Connect the Monitor to the Window Manager
         .onChange(of: monitor.latestNotification) { newValue in
             guard let newNotif = newValue else { return }
+            print("[Debug] ContentView received notification: \(newNotif.title)")
             windowManager.showNotification(newNotif)
         }
     }
@@ -56,6 +57,7 @@ class FloatingNotificationManager: ObservableObject {
     
     private var panel: NSPanel?
     private var hostingView: NSHostingView<DynamicIslandContainer>?
+    private var currentNotificationId: UUID? // Fix: Track active ID to prevent race conditions
     
     init() {
         // Initialize panel directly in init to satisfy strict Swift initialization rules
@@ -73,25 +75,32 @@ class FloatingNotificationManager: ObservableObject {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         self.panel = p
+        print("[Debug] WindowManager initialized")
     }
     
     func showNotification(_ notification: CapturedNotification) {
         guard let panel = self.panel else { return }
         
+        print("[Debug] showNotification called. ID: \(notification.id)")
+        
+        // Update current ID
+        self.currentNotificationId = notification.id
+        
         // 1. Create the SwiftUI Root View for the panel
         // We wrap the island in a container that handles the state/animation internally
-        let rootView = DynamicIslandContainer(notification: notification) {
+        let rootView = DynamicIslandContainer(notification: notification) { [weak self] in
             // Cleanup closure when animation is done
-            self.hidePanel()
+            // Pass the ID to ensure we only hide if this specific notification is the one requesting it
+            print("[Debug] Callback: Container requested hide for ID: \(notification.id)")
+            self?.hidePanel(for: notification.id)
         }
         
         // 2. Set the content
-        if hostingView == nil {
-            hostingView = NSHostingView(rootView: rootView)
-            panel.contentView = hostingView
-        } else {
-            hostingView?.rootView = rootView
-        }
+        // FIX: Always create a fresh NSHostingView. Reusing the old one while swapping rootViews
+        // often fails to trigger onAppear if the window was hidden.
+        let newHostingView = NSHostingView(rootView: rootView)
+        panel.contentView = newHostingView
+        self.hostingView = newHostingView
         
         // 3. Position: Top Right of Main Screen
         if let screen = NSScreen.main {
@@ -108,11 +117,22 @@ class FloatingNotificationManager: ObservableObject {
         panel.orderFrontRegardless()
     }
     
-    private func hidePanel() {
+    private func hidePanel(for id: UUID) {
+        // Critical Fix: Only close if the requesting notification is still the active one.
+        // This prevents old timers from closing new notifications.
+        print("[Debug] hidePanel called for ID: \(id). Current Active: \(currentNotificationId?.uuidString ?? "nil")")
+        
+        guard currentNotificationId == id else {
+            print("[Debug] hidePanel ignored: ID mismatch (New notification already active)")
+            return
+        }
+        
         // We don't actually close the panel, just hide it or let the view collapse.
         // For efficiency, we can orderOut if truly done.
         panel?.orderOut(nil)
         self.isPanelActive = false
+        self.currentNotificationId = nil
+        print("[Debug] Panel hidden successfully")
     }
 }
 
@@ -122,6 +142,7 @@ struct DynamicIslandContainer: View {
     var onDismiss: () -> Void
     
     @State private var islandState: IslandState = .idle
+    @State private var viewOpacity: Double = 0.0 // Start invisible to prevent "stuck" glitches
     
     enum IslandState {
         case idle
@@ -186,38 +207,58 @@ struct DynamicIslandContainer: View {
             .padding(.vertical, isExpanded ? 16 : 0)
             .frame(width: isExpanded ? 380 : 40, height: isExpanded ? 90 : 12)
             .background(
-                Color.black
-                    .opacity(0.9)
+                Color.black // Solid black as requested
                     .shadow(color: .black.opacity(0.3), radius: 15, x: 0, y: 5)
             )
             .clipShape(RoundedRectangle(cornerRadius: isExpanded ? 40 : 20, style: .continuous))
             .padding(.top, 10)
             .padding(.trailing, 10)
             .onTapGesture {
+                print("[Debug] User tapped notification")
                 dismiss()
             }
         }
+        .opacity(viewOpacity) // Apply fade out to whole view
+        .id(notification.id) // Critical Fix: Force view recreation to restart animation
         .onAppear {
+            print("[Debug] Container onAppear for ID: \(notification.id)")
             // Sequence the animation
+            
+            // 1. Fade In
+            withAnimation(.easeIn(duration: 0.2)) {
+                viewOpacity = 1.0
+            }
+            
+            // 2. Expand
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 withAnimation(.interactiveSpring(response: 0.6, dampingFraction: 0.7)) {
                     islandState = .expanded
                 }
             }
             
-            // Auto-dismiss
+            // 3. Auto-dismiss
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                print("[Debug] Auto-dismiss timer fired for ID: \(notification.id)")
                 dismiss()
             }
         }
     }
     
     private func dismiss() {
+        print("[Debug] Dismiss animation started for ID: \(notification.id)")
+        // 1. Shrink Animation
         withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
             islandState = .idle
         }
-        // Tell the window manager to hide the panel after animation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+        
+        // 2. Fade Out Animation (Simultaneous)
+        // Removing the delay ensures that if it shrinks to a capsule, it's already invisible
+        withAnimation(.easeOut(duration: 0.3)) {
+            viewOpacity = 0
+        }
+        
+        // 3. Tell the window manager to hide the panel after animation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             onDismiss()
         }
     }
