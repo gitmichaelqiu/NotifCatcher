@@ -18,8 +18,9 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
     DispatchQueue.global(qos: .userInteractive).async {
-        // OPTIMIZATION: Removed usleep entirely.
-        // We now process immediately to kill the banner as fast as possible.
+        // DELAY FIX: The system needs a tiny moment to populate the text fields
+        // inside the new window. 20ms is the sweet spot (undetectable lag, reliable data).
+        usleep(20000)
         monitor.handleNewNotification(element: element)
     }
 }
@@ -108,8 +109,7 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
-        // COMBINED PASS: Extract text and dismiss in a single tree traversal.
-        // This is significantly faster than doing two separate passes.
+        // COMBINED PASS: Extract text first, THEN dismiss.
         let (title, body) = scanAndDismiss(element)
         
         if !title.isEmpty || !body.isEmpty {
@@ -120,10 +120,12 @@ class NotificationMonitor: ObservableObject {
         }
     }
     
-    // Single-pass optimized scanner: Reads content AND kills the banner simultaneously
+    // Single-pass optimized scanner: Reads content AND identifies killer action
     private func scanAndDismiss(_ root: AXUIElement) -> (String, String) {
         var titles: [String] = []
-        var dismissed = false
+        // We store the dismissal action to execute it AFTER reading text.
+        // This prevents the window from closing while we are trying to read it.
+        var pendingDismissal: (() -> Void)? = nil
 
         func crawl(_ el: AXUIElement, depth: Int) {
             if depth > 5 { return } // Depth limit optimization
@@ -133,7 +135,7 @@ class NotificationMonitor: ObservableObject {
             guard res == .success, let list = children as? [AXUIElement] else { return }
 
             for child in list {
-                // 1. GET BASIC ATTRIBUTES (Role is needed for both text and buttons)
+                // 1. GET BASIC ATTRIBUTES
                 var role: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
                 let roleStr = role as? String ?? ""
@@ -147,13 +149,13 @@ class NotificationMonitor: ObservableObject {
                     }
                 }
 
-                // 3. CHECK FOR DISMISSAL (If not already killed)
-                if !dismissed {
+                // 3. IDENTIFY DISMISSAL (If not already found)
+                if pendingDismissal == nil {
                     var subrole: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
                     let subroleStr = subrole as? String ?? ""
 
-                    // Check Actions (Expensive IPC, so only check promising elements)
+                    // Check Actions
                     if subroleStr == "AXNotificationCenterBanner" || roleStr == "AXGroup" || roleStr == "AXButton" {
                         var actionNames: CFArray?
                         AXUIElementCopyActionNames(child, &actionNames)
@@ -161,30 +163,26 @@ class NotificationMonitor: ObservableObject {
                         if let names = actionNames as? [String] {
                             // Look for explicit "Close" action
                             if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
-                                _ = AXUIElementPerformAction(child, closeAction as CFString)
-                                dismissed = true
+                                pendingDismissal = { _ = AXUIElementPerformAction(child, closeAction as CFString) }
                             } else if names.contains("AXCancel") {
-                                _ = AXUIElementPerformAction(child, kAXCancelAction as CFString)
-                                dismissed = true
+                                pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
                             }
                         }
                     }
 
                     // Backup: Blind Cancel on Banner
-                    if !dismissed && subroleStr == "AXNotificationCenterBanner" {
-                        let err = AXUIElementPerformAction(child, kAXCancelAction as CFString)
-                        if err == .success { dismissed = true }
+                    if pendingDismissal == nil && subroleStr == "AXNotificationCenterBanner" {
+                        pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
                     }
 
                     // Backup: Standard Close Button
-                    if !dismissed && roleStr == "AXButton" {
+                    if pendingDismissal == nil && roleStr == "AXButton" {
                         var title: AnyObject?
                         AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
                         let titleStr = title as? String ?? ""
                         
                         if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
-                            _ = AXUIElementPerformAction(child, kAXPressAction as CFString)
-                            dismissed = true
+                            pendingDismissal = { _ = AXUIElementPerformAction(child, kAXPressAction as CFString) }
                         }
                     }
                 }
@@ -195,6 +193,10 @@ class NotificationMonitor: ObservableObject {
         }
         
         crawl(root, depth: 0)
+        
+        // EXECUTE KILL
+        // Only now, after we have (hopefully) read the text, do we execute the kill switch.
+        pendingDismissal?()
         
         let t = titles.first ?? "New Notification"
         let b = titles.count > 1 ? titles[1] : ""
