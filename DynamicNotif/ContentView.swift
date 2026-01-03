@@ -71,7 +71,7 @@ struct ContentView: View {
             Spacer()
         }
         .frame(minWidth: 400, minHeight: 350)
-        .onChange(of: monitor.latestNotification) { newValue, _ in
+        .onChange(of: monitor.latestNotification) { newValue in
             guard let newNotif = newValue else { return }
             print("[ContentView] Received: \(newNotif.title)")
             windowManager.showNotification(newNotif)
@@ -125,7 +125,7 @@ class FloatingNotificationManager: ObservableObject {
             // Content is centered in Window -> Side Margins = (450 - 380) / 2 = 35px.
             // Desired Visual Right Gap = 21.
             // Window Right Gap = Desired Visual Gap - Side Margin = 21 - 35 = -14.
-            // (Negative padding means the transparent window frame extends 14px off-screen to the right)
+            // User requested explicit padding of -35
             let rightPadding: CGFloat = -35
             
             let xPos = visibleFrame.maxX - windowWidth - rightPadding
@@ -272,8 +272,18 @@ struct DynamicIslandContainer: View {
                    height: isExpanded ? expandedHeight : startHeight)
             .opacity(isVisible ? 1 : 0)
             .onTapGesture {
-                dismissSequence()
+                openApp()
             }
+            // Add Scroll/Swipe Up Gesture to Collapse
+            .gesture(
+                DragGesture(minimumDistance: 15, coordinateSpace: .local)
+                    .onEnded { value in
+                        // Negative height means upward swipe/scroll
+                        if value.translation.height < -15 {
+                            dismissSequence()
+                        }
+                    }
+            )
             .padding(.top, 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -310,6 +320,23 @@ struct DynamicIslandContainer: View {
                 onDismiss()
             }
         }
+    }
+    
+    private func openApp() {
+        print("[Island] Opening app: \(notification.appName)")
+        let workspace = NSWorkspace.shared
+        
+        // 1. Try to launch via Path if available
+        if let path = workspace.fullPath(forApplication: notification.appName) {
+            let url = URL(fileURLWithPath: path)
+            workspace.open(url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+        }
+        // 2. Fallback to legacy launch if path not found
+        else {
+            workspace.launchApplication(notification.appName)
+        }
+        
+        dismissSequence()
     }
 }
 
