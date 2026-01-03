@@ -201,6 +201,13 @@ class NotificationMonitor: ObservableObject {
     }
 
     private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String, profileElement: AXUIElement?) {
+        // FILTER: Ignore large windows (Notification Center Side Panel)
+        // Banners are typically short (~80-150px). The Notification Center list is full screen height.
+        if let frame = getElementFrame(root), frame.height > 600 {
+            print("[Filter] Ignoring large window (Height: \(frame.height)). Likely Notification Center history.")
+            return ("", "", "", nil)
+        }
+
         var titles: [String] = []
         var detectedAppName: String = "System"
         var candidateProfileElement: AXUIElement? = nil
