@@ -5,7 +5,6 @@ import Combine
 // MARK: - Main Control Panel (Settings Window)
 struct ContentView: View {
     @StateObject var monitor = NotificationMonitor()
-    // We move the window management to a specialized object
     @StateObject var windowManager = FloatingNotificationManager()
     
     var body: some View {
@@ -42,7 +41,6 @@ struct ContentView: View {
             Spacer()
         }
         .frame(minWidth: 400, minHeight: 300)
-        // Connect the Monitor to the Window Manager
         .onChange(of: monitor.latestNotification) { newValue in
             guard let newNotif = newValue else { return }
             print("[Debug] ContentView received notification: \(newNotif.title)")
@@ -51,19 +49,18 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Floating Window Manager (The "Hacker" Part)
+// MARK: - Floating Window Manager
 class FloatingNotificationManager: ObservableObject {
-    @Published var isPanelActive = false // Added to satisfy ObservableObject protocol requirements
+    @Published var isPanelActive = false
     
     private var panel: NSPanel?
     private var hostingView: NSHostingView<DynamicIslandContainer>?
-    private var currentNotificationId: UUID? // Fix: Track active ID to prevent race conditions
+    private var currentNotificationId: UUID?
     
     init() {
-        // Initialize panel directly in init to satisfy strict Swift initialization rules
         let p = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 400, height: 120),
-            styleMask: [.borderless, .nonactivatingPanel], // No title bar, doesn't steal focus
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -71,7 +68,6 @@ class FloatingNotificationManager: ObservableObject {
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = false
-        // Use a very high window level to float above almost everything (matching Boring Notch)
         p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 3)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
@@ -83,55 +79,40 @@ class FloatingNotificationManager: ObservableObject {
         guard let panel = self.panel else { return }
         
         print("[Debug] showNotification called. ID: \(notification.id)")
-        
-        // Update current ID
         self.currentNotificationId = notification.id
         
-        // 1. Create the SwiftUI Root View for the panel
-        // We wrap the island in a container that handles the state/animation internally
         let rootView = DynamicIslandContainer(notification: notification) { [weak self] in
-            // Cleanup closure when animation is done
-            // Pass the ID to ensure we only hide if this specific notification is the one requesting it
             print("[Debug] Callback: Container requested hide for ID: \(notification.id)")
             self?.hidePanel(for: notification.id)
         }
         
-        // 2. Set the content
-        // FIX: Always create a fresh NSHostingView. Reusing the old one while swapping rootViews
-        // often fails to trigger onAppear if the window was hidden.
         let newHostingView = NSHostingView(rootView: rootView)
         panel.contentView = newHostingView
         self.hostingView = newHostingView
         
-        // 3. Position: Top Right of Main Screen
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
-            // Position from right, near the top (flush below menu bar)
-            // visibleFrame.maxY is the bottom edge of the menu bar.
-            // We set X to match the right side padding.
-            let xPos = visibleFrame.maxX - 400 // Width + Padding
-            let yPos = visibleFrame.maxY - 120  // Height of our window (120)
+            // Center the 400px window relative to where we want the notch center to be.
+            // If we want the notch center to be ~200px from the right edge:
+            // Right Edge X = visibleFrame.maxX
+            // Window Width = 400.
+            // X Pos = visibleFrame.maxX - 400.
+            // This places the window content area [0...400]. Center is 200.
+            // So the notification center will be at screen_right - 200px.
+            let xPos = visibleFrame.maxX - 400
+            let yPos = visibleFrame.maxY - 120
             
             panel.setFrameOrigin(NSPoint(x: xPos, y: yPos))
         }
         
-        // 4. Show it without activating app (prevents stealing focus)
         self.isPanelActive = true
         panel.orderFrontRegardless()
     }
     
     private func hidePanel(for id: UUID) {
-        // Critical Fix: Only close if the requesting notification is still the active one.
-        // This prevents old timers from closing new notifications.
-        print("[Debug] hidePanel called for ID: \(id). Current Active: \(currentNotificationId?.uuidString ?? "nil")")
+        print("[Debug] hidePanel called for ID: \(id). Current: \(currentNotificationId?.uuidString ?? "nil")")
+        guard currentNotificationId == id else { return }
         
-        guard currentNotificationId == id else {
-            print("[Debug] hidePanel ignored: ID mismatch (New notification already active)")
-            return
-        }
-        
-        // We don't actually close the panel, just hide it or let the view collapse.
-        // For efficiency, we can orderOut if truly done.
         panel?.orderOut(nil)
         self.isPanelActive = false
         self.currentNotificationId = nil
@@ -139,13 +120,13 @@ class FloatingNotificationManager: ObservableObject {
     }
 }
 
-// MARK: - Dynamic Island Container (Manages its own animation)
+// MARK: - Dynamic Island Container
 struct DynamicIslandContainer: View {
     let notification: CapturedNotification
     var onDismiss: () -> Void
     
     @State private var islandState: IslandState = .idle
-    @State private var viewOpacity: Double = 0.0 // Start invisible to prevent "stuck" glitches
+    @State private var viewOpacity: Double = 0.0
     
     enum IslandState {
         case idle
@@ -154,18 +135,18 @@ struct DynamicIslandContainer: View {
     
     var isExpanded: Bool { islandState == .expanded }
     
-    // Animation constants matching Boring Notch physics
+    // Exact spring physics from reference
     private let openAnimation = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.8, blendDuration: 0)
     private let closeAnimation = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
     
-    // Boring Notch specific geometry
+    // Geometry
     private var topRadius: CGFloat { isExpanded ? 19 : 6 }
     private var bottomRadius: CGFloat { isExpanded ? 24 : 14 }
     
     var body: some View {
-        // The view itself is transparent, holding the island
-        ZStack(alignment: .topTrailing) {
-            Color.clear // Transparent background for the window content area
+        // Alignment .top ensures horizontal centering relative to the window width
+        ZStack(alignment: .top) {
+            Color.clear
             
             HStack(alignment: .center, spacing: 0) {
                 // LEFT: App Icon
@@ -216,81 +197,67 @@ struct DynamicIslandContainer: View {
             }
             .padding(.horizontal, isExpanded ? 14 : 0)
             .padding(.vertical, isExpanded ? 14 : 0)
-            // STYLE UPDATE: Start tiny (width 100, height 0) at the very top edge
-            .frame(width: isExpanded ? 340 : 100, height: isExpanded ? 80 : 0)
+            // STYLE OPTIMIZATION:
+            // Start with a wider "seed" (120) so it doesn't look like a point source.
+            // Height 0 ensures it emerges from the top edge.
+            .frame(width: isExpanded ? 340 : 120, height: isExpanded ? 80 : 0)
             .background(
-                ZStack {
-                    // Main black background
-                    Color.black
-                    // Subtle border overlay
-                    NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1.5)
-                }
-                .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 5)
+                Color.black
+                    .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 5)
             )
-            // STYLE UPDATE: Use Custom NotchShape for the clip
             .clipShape(NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius))
-            .padding(.top, 0) // TOUCH THE MENU BAR (No gap)
-            .padding(.trailing, 16) // Padding from the right screen edge
+            // BORDER FIX: Use overlay instead of strokeBorder
+            .overlay(
+                NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 1.5)
+            )
+            .padding(.top, 0) // Flush with menu bar
             .onTapGesture {
                 print("[Debug] User tapped notification")
                 dismiss()
             }
         }
-        .opacity(viewOpacity) // Apply fade out to whole view
-        .id(notification.id) // Critical Fix: Force view recreation to restart animation
+        .opacity(viewOpacity)
+        .id(notification.id)
         .onAppear {
             print("[Debug] Container onAppear for ID: \(notification.id)")
-            // Sequence the animation
-            
             // 1. Fade In
             withAnimation(.easeIn(duration: 0.1)) {
                 viewOpacity = 1.0
             }
-            
-            // 2. Expand with custom physics
+            // 2. Expand
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
                 withAnimation(openAnimation) {
                     islandState = .expanded
                 }
             }
-            
-            // 3. Auto-dismiss
+            // 3. Timer
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
-                print("[Debug] Auto-dismiss timer fired for ID: \(notification.id)")
                 dismiss()
             }
         }
     }
     
     private func dismiss() {
-        print("[Debug] Dismiss animation started for ID: \(notification.id)")
-        // 1. Shrink Animation
         withAnimation(closeAnimation) {
             islandState = .idle
         }
-        
-        // 2. Fade Out Animation (Simultaneous)
         withAnimation(.easeOut(duration: 0.2)) {
             viewOpacity = 0
         }
-        
-        // 3. Tell the window manager to hide the panel after animation
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             onDismiss()
         }
     }
 }
 
-// MARK: - Notch Shape (Exact Copy from Boring Notch)
+// MARK: - Notch Shape
 struct NotchShape: Shape {
     var topCornerRadius: CGFloat
     var bottomCornerRadius: CGFloat
 
     var animatableData: AnimatablePair<CGFloat, CGFloat> {
-        get {
-            .init(topCornerRadius, bottomCornerRadius)
-        }
+        get { .init(topCornerRadius, bottomCornerRadius) }
         set {
             topCornerRadius = newValue.first
             bottomCornerRadius = newValue.second
@@ -299,37 +266,31 @@ struct NotchShape: Shape {
 
     func path(in rect: CGRect) -> Path {
         var path = Path()
-
         path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-
+        
         path.addQuadCurve(
             to: CGPoint(x: rect.minX + topCornerRadius, y: rect.minY + topCornerRadius),
             control: CGPoint(x: rect.minX + topCornerRadius, y: rect.minY)
         )
-
         path.addLine(to: CGPoint(x: rect.minX + topCornerRadius, y: rect.maxY - bottomCornerRadius))
-
+        
         path.addQuadCurve(
             to: CGPoint(x: rect.minX + topCornerRadius + bottomCornerRadius, y: rect.maxY),
             control: CGPoint(x: rect.minX + topCornerRadius, y: rect.maxY)
         )
-
         path.addLine(to: CGPoint(x: rect.maxX - topCornerRadius - bottomCornerRadius, y: rect.maxY))
-
+        
         path.addQuadCurve(
             to: CGPoint(x: rect.maxX - topCornerRadius, y: rect.maxY - bottomCornerRadius),
             control: CGPoint(x: rect.maxX - topCornerRadius, y: rect.maxY)
         )
-
         path.addLine(to: CGPoint(x: rect.maxX - topCornerRadius, y: rect.minY + topCornerRadius))
-
+        
         path.addQuadCurve(
             to: CGPoint(x: rect.maxX, y: rect.minY),
             control: CGPoint(x: rect.maxX - topCornerRadius, y: rect.minY)
         )
-
         path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
-
         return path
     }
 }
