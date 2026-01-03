@@ -85,7 +85,8 @@ class FloatingNotificationManager: ObservableObject {
     private var currentNotificationId: UUID?
     
     // Config: Position logic for Top Right
-    private let windowWidth: CGFloat = 400
+    // We use a wider window (450) to hold the 360px content + shadows (radius 15) without clipping.
+    private let windowWidth: CGFloat = 450
     private let windowHeight: CGFloat = 200
     
     init() {
@@ -117,7 +118,16 @@ class FloatingNotificationManager: ObservableObject {
         
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
-            let rightPadding: CGFloat = 10
+            
+            // VISUAL CALCULATION:
+            // Target: Visual content (360px) should be 21px from Right Edge.
+            // Window Width: 450px.
+            // Content is centered in Window -> Side Margins = (450 - 360) / 2 = 45px.
+            // Desired Visual Right Gap = 21.
+            // Window Right Gap = Desired Visual Gap - Side Margin = 21 - 45 = -24.
+            // (Negative padding means the transparent window frame extends 24px off-screen to the right)
+            let rightPadding: CGFloat = -24
+            
             let xPos = visibleFrame.maxX - windowWidth - rightPadding
             let yPos = visibleFrame.maxY - windowHeight
             
@@ -144,9 +154,17 @@ class FloatingNotificationManager: ObservableObject {
         print("[WindowManager] Hiding panel and disabling clicks")
         guard let panel = self.panel else { return }
         
-        panel.alphaValue = 0
+        // DEACTIVATE:
+        // 1. Force mouse events off FIRST
         panel.ignoresMouseEvents = true
         
+        // 2. Hide visual properties
+        panel.alphaValue = 0
+        
+        // 3. Move window off-screen to ensure it cannot block anything
+        panel.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        
+        // 4. Remove from window list
         panel.orderOut(nil)
     }
 }
@@ -163,7 +181,9 @@ struct DynamicIslandContainer: View {
     
     private let startWidth: CGFloat = 20
     private let startHeight: CGFloat = 0
-    private let expandedWidth: CGFloat = 360
+    
+    // User Specification: Width 360
+    private let expandedWidth: CGFloat = 380
     private let expandedHeight: CGFloat = 84
     
     var body: some View {
