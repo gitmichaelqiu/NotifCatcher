@@ -178,16 +178,16 @@ struct DynamicIslandContainer: View {
             ZStack(alignment: .top) {
                 // Background with Custom Shape
                 LiquidMenubarShape(
-                    bottomRadius: isExpanded ? 22 : 4,
-                    flareRadius: isExpanded ? 12 : 2 // Animate flare radius for smoothness
+                    bottomRadius: isExpanded ? 32 : 4,
+                    flareRadius: isExpanded ? 15 : 2 // Animate flare radius for smoothness
                 )
                 .fill(.black)
                 .shadow(color: .black.opacity(0.4), radius: 15, x: 0, y: 8)
                 
                 // Border (Subtle shine)
                 LiquidMenubarShape(
-                    bottomRadius: isExpanded ? 22 : 4,
-                    flareRadius: isExpanded ? 12 : 2
+                    bottomRadius: isExpanded ? 32 : 4,
+                    flareRadius: isExpanded ? 15 : 2
                 )
                 .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
                 
