@@ -57,9 +57,13 @@ class FloatingNotificationManager: ObservableObject {
     private var hostingView: NSHostingView<DynamicIslandContainer>?
     private var currentNotificationId: UUID?
     
+    // Window configuration constants
+    private let windowWidth: CGFloat = 450
+    private let windowHeight: CGFloat = 200
+    
     init() {
         let p = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 120),
+            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -68,6 +72,7 @@ class FloatingNotificationManager: ObservableObject {
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = false
+        // Use a very high window level to float above system notifications
         p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 3)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
@@ -86,21 +91,21 @@ class FloatingNotificationManager: ObservableObject {
             self?.hidePanel(for: notification.id)
         }
         
+        // FIX: Always create a fresh NSHostingView to ensure lifecycle events trigger
         let newHostingView = NSHostingView(rootView: rootView)
+        // Fix: NSHostingView IS an NSView, it doesn't have a 'view' property.
+        newHostingView.wantsLayer = true
+        newHostingView.layer?.backgroundColor = NSColor.clear.cgColor // Ensure transparency
         panel.contentView = newHostingView
         self.hostingView = newHostingView
         
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
-            // Center the 400px window relative to where we want the notch center to be.
-            // If we want the notch center to be ~200px from the right edge:
-            // Right Edge X = visibleFrame.maxX
-            // Window Width = 400.
-            // X Pos = visibleFrame.maxX - 400.
-            // This places the window content area [0...400]. Center is 200.
-            // So the notification center will be at screen_right - 200px.
-            let xPos = visibleFrame.maxX - 400
-            let yPos = visibleFrame.maxY - 120
+            // Position the window's top-right corner near the screen's top-right corner.
+            // visibleFrame.maxX = Screen Right.
+            // visibleFrame.maxY = Bottom of Menu Bar.
+            let xPos = visibleFrame.maxX - windowWidth
+            let yPos = visibleFrame.maxY - windowHeight
             
             panel.setFrameOrigin(NSPoint(x: xPos, y: yPos))
         }
@@ -136,17 +141,23 @@ struct DynamicIslandContainer: View {
     var isExpanded: Bool { islandState == .expanded }
     
     // Exact spring physics from reference
-    private let openAnimation = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.8, blendDuration: 0)
-    private let closeAnimation = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
+    private let openAnimation = Animation.interactiveSpring(response: 0.45, dampingFraction: 0.75, blendDuration: 0)
+    private let closeAnimation = Animation.spring(response: 0.5, dampingFraction: 0.85, blendDuration: 0)
     
     // Geometry
-    private var topRadius: CGFloat { isExpanded ? 19 : 6 }
-    private var bottomRadius: CGFloat { isExpanded ? 24 : 14 }
+    private var topRadius: CGFloat { isExpanded ? 18 : 6 }
+    private var bottomRadius: CGFloat { isExpanded ? 22 : 14 }
+    
+    // Layout Constants
+    private let expandedWidth: CGFloat = 350
+    private let idleWidth: CGFloat = 120
+    private let expandedHeight: CGFloat = 84
+    private let edgePadding: CGFloat = 12 // Gap from screen edge
     
     var body: some View {
-        // Alignment .top ensures horizontal centering relative to the window width
-        ZStack(alignment: .top) {
-            Color.clear
+        // ZStack alignment .topTrailing to pin to the corner, allowing manual padding to control centering
+        ZStack(alignment: .topTrailing) {
+            Color.clear // Transparent background
             
             HStack(alignment: .center, spacing: 0) {
                 // LEFT: App Icon
@@ -198,20 +209,26 @@ struct DynamicIslandContainer: View {
             .padding(.horizontal, isExpanded ? 14 : 0)
             .padding(.vertical, isExpanded ? 14 : 0)
             // STYLE OPTIMIZATION:
-            // Start with a wider "seed" (120) so it doesn't look like a point source.
-            // Height 0 ensures it emerges from the top edge.
-            .frame(width: isExpanded ? 340 : 120, height: isExpanded ? 80 : 0)
+            // - Width grows from 120 -> 350
+            // - Height grows from 0 -> 84
+            .frame(width: isExpanded ? expandedWidth : idleWidth, height: isExpanded ? expandedHeight : 0)
             .background(
-                Color.black
-                    .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 5)
+                ZStack {
+                    // Main black background
+                    Color.black
+                    // Subtle border overlay
+                    NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.5), radius: 12, x: 0, y: 6)
             )
             .clipShape(NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius))
-            // BORDER FIX: Use overlay instead of strokeBorder
-            .overlay(
-                NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1.5)
-            )
             .padding(.top, 0) // Flush with menu bar
+            // MATH FOR CENTERING GROWTH:
+            // Center of expanded (350) is at: edgePadding + 175 = 187 from right.
+            // Center of idle (120) must be at 187 from right.
+            // So idle trailing padding = 187 - (120/2) = 187 - 60 = 127.
+            .padding(.trailing, isExpanded ? edgePadding : (edgePadding + (expandedWidth - idleWidth) / 2))
             .onTapGesture {
                 print("[Debug] User tapped notification")
                 dismiss()
@@ -221,30 +238,41 @@ struct DynamicIslandContainer: View {
         .id(notification.id)
         .onAppear {
             print("[Debug] Container onAppear for ID: \(notification.id)")
+            
             // 1. Fade In
-            withAnimation(.easeIn(duration: 0.1)) {
+            withAnimation(.easeIn(duration: 0.15)) {
                 viewOpacity = 1.0
             }
+            
             // 2. Expand
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            // Small delay to ensure render loop catches up
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 withAnimation(openAnimation) {
                     islandState = .expanded
                 }
             }
-            // 3. Timer
+            
+            // 3. Auto-dismiss
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+                print("[Debug] Auto-dismiss timer fired for ID: \(notification.id)")
                 dismiss()
             }
         }
     }
     
     private func dismiss() {
+        print("[Debug] Dismiss animation started for ID: \(notification.id)")
+        // 1. Shrink Animation
         withAnimation(closeAnimation) {
             islandState = .idle
         }
-        withAnimation(.easeOut(duration: 0.2)) {
+        
+        // 2. Fade Out Animation
+        withAnimation(.easeOut(duration: 0.25)) {
             viewOpacity = 0
         }
+        
+        // 3. Close Window
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             onDismiss()
         }
