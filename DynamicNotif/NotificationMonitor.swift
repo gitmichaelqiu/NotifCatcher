@@ -1,7 +1,7 @@
 import Foundation
 import ApplicationServices
 import Cocoa
-internal import Combine
+import Combine
 
 // A simple struct to hold notification data
 struct CapturedNotification: Identifiable, Equatable {
@@ -15,13 +15,10 @@ struct CapturedNotification: Identifiable, Equatable {
 // Global C-style callback function for the Accessibility API
 func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
     guard let refcon = refcon else { return }
-    // Convert the unsafe pointer back to our Swift object
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
-    // Process on background queue to avoid blocking UI, then sync back to Main
     DispatchQueue.global(qos: .userInteractive).async {
-        // Small delay to let the UI settle (text rendering)
-        usleep(100000) // 0.1s
+        usleep(100000) // 0.1s delay for text rendering
         monitor.handleNewNotification(element: element)
     }
 }
@@ -30,6 +27,7 @@ class NotificationMonitor: ObservableObject {
     @Published var latestNotification: CapturedNotification?
     @Published var permissionGranted: Bool = false
     @Published var isListening: Bool = false
+    @Published var errorMessage: String? = nil
     
     private var observer: AXObserver?
     
@@ -43,48 +41,76 @@ class NotificationMonitor: ObservableObject {
     }
     
     func startMonitoring() {
-        guard checkPermissions() else { return }
+        self.errorMessage = nil
+        guard checkPermissions() else {
+            self.errorMessage = "Accessibility permission missing."
+            return
+        }
         
-        // 1. Find Notification Center PID
-        let task = Process()
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.arguments = ["-c", "pgrep -x NotificationCenter"]
-        task.launchPath = "/bin/zsh"
-        task.launch()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let pid = pid_t(output) else {
+        // ROBUST PID FINDING (Reverted to Shell method which is more reliable for 'hacker' tools)
+        guard let pid = findNotificationCenterPID() else {
             print("❌ Could not find Notification Center PID")
+            DispatchQueue.main.async {
+                self.errorMessage = "Could not find 'NotificationCenter'.\nIs the Sandbox disabled in Project Settings?"
+            }
             return
         }
         
         print("✅ Found Notification Center PID: \(pid)")
         
-        // 2. Create the Observer
-        // We pass 'self' as a pointer (refcon) so the callback knows which instance to update
         let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         
         guard AXObserverCreate(pid, observerCallback, &observer) == .success, let axObserver = observer else {
             print("❌ Failed to create AXObserver")
+            DispatchQueue.main.async {
+                self.errorMessage = "Failed to create Observer.\nTry removing the App from Accessibility settings and re-adding it."
+            }
             return
         }
         
-        // 3. Add source to RunLoop
         CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(axObserver), .defaultMode)
         
-        // 4. Watch for Window Created (Banner appearing)
         let appElement = AXUIElementCreateApplication(pid)
         AXObserverAddNotification(axObserver, appElement, kAXWindowCreatedNotification as CFString, selfPointer)
         
-        self.isListening = true
+        DispatchQueue.main.async {
+            self.isListening = true
+        }
         print("👂 Monitoring started...")
     }
     
-    // Called by the global callback
+    // Helper: Finds PID using /usr/bin/pgrep (Reliable) or NSWorkspace (Fallback)
+    private func findNotificationCenterPID() -> pid_t? {
+        // Attempt 1: The "Hacker" way (Shell/pgrep)
+        // We use absolute path /usr/bin/pgrep because $PATH might not be set in Xcode apps.
+        let task = Process()
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        // Explicitly point to the binary to avoid PATH issues
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        task.arguments = ["-x", "NotificationCenter"]
+        
+        do {
+            try task.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               let pid = Int32(output) {
+                return pid
+            }
+        } catch {
+            print("Pgrep failed: \(error)")
+        }
+
+        // Attempt 2: Native NSWorkspace (Fallback - usually only works if NC has a visible window)
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.NotificationCenter" }) {
+            return app.processIdentifier
+        }
+        
+        return nil
+    }
+    
     func handleNewNotification(element: AXUIElement) {
-        // Recursively read the element
         let (title, body) = extractText(from: element)
         
         if !title.isEmpty || !body.isEmpty {
@@ -92,24 +118,18 @@ class NotificationMonitor: ObservableObject {
                 print("🔔 Captured: \(title) - \(body)")
                 self.latestNotification = CapturedNotification(title: title, body: body, appName: "System")
             }
-            
-            // OPTIONAL: Try to close the system notification to complete the "Reshape" illusion
-            // attemptDismiss(element: element)
         }
     }
     
     private func extractText(from element: AXUIElement) -> (String, String) {
         var titles: [String] = []
         
-        // Helper to crawl the tree
         func crawl(_ el: AXUIElement) {
-            // Check Children
             var children: AnyObject?
             AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
             
             if let list = children as? [AXUIElement] {
                 for child in list {
-                    // Check Role
                     var role: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
                     
@@ -126,16 +146,8 @@ class NotificationMonitor: ObservableObject {
         }
         
         crawl(element)
-        
-        // Heuristic: Usually the first text is Title, second is Body
         let t = titles.first ?? "New Notification"
         let b = titles.count > 1 ? titles[1] : ""
-        
         return (t, b)
-    }
-    
-    private func attemptDismiss(element: AXUIElement) {
-        // Logic to find 'AXButton' with title 'Close' and perform kAXPressAction
-        // (Simplified for brevity, refer to previous conversation for full implementation)
     }
 }

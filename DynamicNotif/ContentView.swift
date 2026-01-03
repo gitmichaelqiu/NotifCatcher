@@ -20,6 +20,24 @@ struct ContentView: View {
                         .font(.caption)
                         .multilineTextAlignment(.center)
                         .padding()
+                } else if let error = monitor.errorMessage {
+                    // ERROR STATE
+                    Text("Error Starting Monitor")
+                        .foregroundColor(.red)
+                        .font(.headline)
+                        .padding(.top, 5)
+                    
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                    
+                    Button("Retry") {
+                        monitor.startMonitoring()
+                    }
+                    .padding(.top, 5)
+                    
                 } else if !monitor.isListening {
                     Button("Start Monitoring") {
                         monitor.startMonitoring()
