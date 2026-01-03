@@ -62,7 +62,7 @@ struct ContentView: View {
                     .controlSize(.large)
                     
                     if monitor.isListening {
-                        Text("Minimize this window. The Island will appear at the top center of your screen.")
+                        Text("Minimize this window. The Island will appear at the top RIGHT of your screen.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -85,9 +85,8 @@ class FloatingNotificationManager: ObservableObject {
     private var panel: NSPanel?
     private var currentNotificationId: UUID?
     
-    // Config: Center the window at the top of the screen
-    // We make the window wide enough to hold the expanded animation, but clear background.
-    private let windowWidth: CGFloat = 600
+    // Config: Position logic for Top Right
+    private let windowWidth: CGFloat = 400 // Slightly wider for banner look
     private let windowHeight: CGFloat = 200
     
     init() {
@@ -102,8 +101,8 @@ class FloatingNotificationManager: ObservableObject {
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = false
-        // Level must be higher than the Menu Bar (Main Menu + 1)
-        p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 1)
+        // Level must be higher than the Menu Bar (Main Menu + 1) to cover native notifications
+        p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.ignoresMouseEvents = false // Allow interaction
         
@@ -115,14 +114,20 @@ class FloatingNotificationManager: ObservableObject {
         
         self.currentNotificationId = notification.id
         
-        // 1. Position Window: Top Center
+        // 1. Position Window: Top Right
         if let screen = NSScreen.main {
-            let screenFrame = screen.frame
-            // X: Center of screen - half of window width
-            let xPos = screenFrame.midX - (windowWidth / 2)
-            // Y: Top of screen - window height (macOS coordinates start at bottom)
-            // We adjust slightly down so the "island" sits visually within the bezel/notch area
-            let yPos = screenFrame.maxY - windowHeight
+            let visibleFrame = screen.visibleFrame
+            // X: Align to right edge (maxX)
+            // We align it exactly to the right edge or with a tiny padding?
+            // Usually banners have a small margin, but "attached" styles might touch the edge.
+            // Let's stick to standard notification alignment: ~10px padding from right.
+            let rightPadding: CGFloat = 10
+            let xPos = visibleFrame.maxX - windowWidth - rightPadding
+            
+            // Y: Touch the Menu Bar.
+            // visibleFrame.maxY is the bottom of the menu bar.
+            // We want the window content to start exactly there.
+            let yPos = visibleFrame.maxY - windowHeight
             
             panel.setFrame(NSRect(x: xPos, y: yPos, width: windowWidth, height: windowHeight), display: true)
         }
@@ -141,11 +146,7 @@ class FloatingNotificationManager: ObservableObject {
     }
     
     private func hidePanel() {
-        // We don't actually close the window immediately, we let the SwiftUI view animate out.
-        // But for safety, we can clear content after a delay if needed.
-        // For this demo, we just leave the window ready for the next one.
-        // If we wanted to "hide" it completely:
-        // panel?.orderOut(nil)
+         // Panel hiding logic
     }
 }
 
@@ -155,52 +156,51 @@ struct DynamicIslandContainer: View {
     var onDismiss: () -> Void
     
     // Animation States
-    @State private var islandState: IslandState = .hidden
+    @State private var isExpanded: Bool = false
+    @State private var isVisible: Bool = false
     
-    enum IslandState {
-        case hidden     // Invisible/Tiny
-        case idle       // The "Notch" pill shape
-        case expanded   // The full notification
-    }
-    
-    // Physics Configuration (Apple-like Spring)
-    private let springAnim = Animation.interpolatingSpring(mass: 1.0, stiffness: 220, damping: 22, initialVelocity: 0)
+    // Physics Configuration (Bouncy Spring)
+    // Using a slightly more responsive spring for the "pop" effect
+    private let springAnim = Animation.interpolatingSpring(mass: 0.5, stiffness: 200, damping: 18, initialVelocity: 0.5)
     
     // Dimensions
-    // Idle: Matches standard MacBook Notch (~150x32)
-    private let idleWidth: CGFloat = 160
-    private let idleHeight: CGFloat = 32
+    // Start State: Small invisible point at top center
+    private let startWidth: CGFloat = 20
+    private let startHeight: CGFloat = 0
     
-    // Expanded: Large banner
-    private let expandedWidth: CGFloat = 420
-    private let expandedHeight: CGFloat = 92
-    
-    var isExpanded: Bool { islandState == .expanded }
-    var isHidden: Bool { islandState == .hidden }
+    // Expanded: Full notification banner size
+    private let expandedWidth: CGFloat = 360
+    private let expandedHeight: CGFloat = 84
     
     var body: some View {
         VStack {
             // The Island
-            ZStack {
-                // Background Layer (Black Glass)
-                RoundedRectangle(cornerRadius: isExpanded ? 24 : 16, style: .continuous)
-                    .fill(.black)
-                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
+            ZStack(alignment: .top) {
+                // Background with Custom Shape
+                LiquidMenubarShape(
+                    bottomRadius: isExpanded ? 22 : 4,
+                    flareRadius: isExpanded ? 12 : 2 // Animate flare radius for smoothness
+                )
+                .fill(.black)
+                .shadow(color: .black.opacity(0.4), radius: 15, x: 0, y: 8)
                 
                 // Border (Subtle shine)
-                RoundedRectangle(cornerRadius: isExpanded ? 24 : 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                LiquidMenubarShape(
+                    bottomRadius: isExpanded ? 22 : 4,
+                    flareRadius: isExpanded ? 12 : 2
+                )
+                .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
                 
                 // CONTENT LAYER
                 HStack(spacing: 12) {
                     // LEFT: Icon
                     ZStack {
                         Circle()
-                            .fill(LinearGradient(colors: [.indigo, .purple], startPoint: .top, endPoint: .bottom))
-                            .frame(width: isExpanded ? 40 : 0, height: isExpanded ? 40 : 0)
+                            .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .top, endPoint: .bottom))
+                            .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
                             .opacity(isExpanded ? 1 : 0)
                         
-                        Image(systemName: "bell.fill")
+                        Image(systemName: "bell.badge.fill")
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(width: 18, height: 18)
@@ -210,45 +210,51 @@ struct DynamicIslandContainer: View {
                     
                     // CENTER: Text Info
                     if isExpanded {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 3) {
                             Text(notification.title)
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(.white)
                                 .lineLimit(1)
                             
                             if !notification.body.isEmpty {
                                 Text(notification.body)
                                     .font(.system(size: 13))
-                                    .foregroundColor(.gray)
-                                    .lineLimit(1)
+                                    .foregroundColor(.white.opacity(0.8))
+                                    .lineLimit(2)
                             }
                         }
-                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     
-                    // RIGHT: Time/Visualizer
+                    // RIGHT: Time/Close
                     if isExpanded {
-                        Text("Now")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
+                        VStack(alignment: .trailing) {
+                            Text("Now")
+                                .font(.caption2)
+                                .foregroundColor(.gray)
+                        }
                     }
                 }
-                .padding(.horizontal, 16)
-                
-                // NOTCH MASK (Visual trickery)
-                // This simulates the hardware camera cutout if needed,
-                // but for a purely software solution, just the black pill is usually enough.
+                .padding(.horizontal, 20) // Extra padding to clear the "flare"
+                .padding(.top, 14) // Push down from menu bar
+                .frame(height: isExpanded ? expandedHeight : startHeight, alignment: .top)
+                .opacity(isExpanded ? 1 : 0)
             }
             // Dynamic Sizing
-            .frame(width: isExpanded ? expandedWidth : (isHidden ? 0 : idleWidth),
-                   height: isExpanded ? expandedHeight : (isHidden ? 0 : idleHeight))
+            // Alignment .top ensures it grows from the horizontal center
+            .frame(width: isExpanded ? expandedWidth : startWidth,
+                   height: isExpanded ? expandedHeight : startHeight)
+            .opacity(isVisible ? 1 : 0)
             .onTapGesture {
                 dismissSequence()
             }
-            .padding(.top, 0) // Pin to very top
+            .padding(.top, 0) // Pin to very top (menu bar contact)
         }
+        // ALIGNMENT: Top (Horizontal Center)
+        // This makes the island grow symmetrically from the center of the window width
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(.trailing, 0)
         .id(notification.id)
         .onAppear {
             runPresentationSequence()
@@ -256,42 +262,106 @@ struct DynamicIslandContainer: View {
     }
     
     private func runPresentationSequence() {
-        // 1. Init state (already hidden)
+        // 1. Initial State: Invisible
+        isVisible = true
         
-        // 2. Expand to "Notch" (Idle state) immediately
-        withAnimation(.easeOut(duration: 0.2)) {
-            islandState = .idle
-        }
-        
-        // 3. Expand to Notification (Bounce)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        // 2. Direct Expansion (Pop)
+        // Small delay to ensure render cycle is ready
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             withAnimation(springAnim) {
-                islandState = .expanded
+                isExpanded = true
             }
         }
         
-        // 4. Auto Dismiss after 4 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) {
+        // 3. Auto Dismiss
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
             dismissSequence()
         }
     }
     
     private func dismissSequence() {
-        // 1. Shrink back to Notch
         withAnimation(springAnim) {
-            islandState = .idle
+            isExpanded = false
         }
         
-        // 2. Disappear completely
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             withAnimation(.easeIn(duration: 0.2)) {
-                islandState = .hidden
+                isVisible = false
             }
             
-            // 3. Cleanup
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 onDismiss()
             }
         }
+    }
+}
+
+// MARK: - Custom Shape for "Attached" Look
+// Creates a shape that looks like it flows out of the menu bar
+struct LiquidMenubarShape: Shape {
+    var bottomRadius: CGFloat
+    var flareRadius: CGFloat // The "reversed" radius at top corners
+    
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(bottomRadius, flareRadius) }
+        set {
+            bottomRadius = newValue.first
+            flareRadius = newValue.second
+        }
+    }
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        
+        // Dimensions
+        let w = rect.width
+        let h = rect.height
+        
+        // Clamp flare radius to avoid crossing in middle when width is small
+        let safeFlare = min(flareRadius, w / 2)
+        
+        let inset = safeFlare
+        let bodyMinX = rect.minX + inset
+        let bodyMaxX = rect.maxX - inset
+        
+        // Start Top Left (At Menu Bar, full width)
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        
+        // 1. Top Left Flare (Reversed/Concave Curve)
+        path.addQuadCurve(
+            to: CGPoint(x: bodyMinX, y: rect.minY + safeFlare),
+            control: CGPoint(x: bodyMinX, y: rect.minY)
+        )
+        
+        // 2. Left Edge
+        path.addLine(to: CGPoint(x: bodyMinX, y: rect.maxY - bottomRadius))
+        
+        // 3. Bottom Left Corner (Standard Convex)
+        path.addQuadCurve(
+            to: CGPoint(x: bodyMinX + bottomRadius, y: rect.maxY),
+            control: CGPoint(x: bodyMinX, y: rect.maxY)
+        )
+        
+        // 4. Bottom Edge
+        path.addLine(to: CGPoint(x: bodyMaxX - bottomRadius, y: rect.maxY))
+        
+        // 5. Bottom Right Corner (Standard Convex)
+        path.addQuadCurve(
+            to: CGPoint(x: bodyMaxX, y: rect.maxY - bottomRadius),
+            control: CGPoint(x: bodyMaxX, y: rect.maxY)
+        )
+        
+        // 6. Right Edge
+        path.addLine(to: CGPoint(x: bodyMaxX, y: rect.minY + safeFlare))
+        
+        // 7. Top Right Flare (Reversed/Concave Curve)
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY),
+            control: CGPoint(x: bodyMaxX, y: rect.minY)
+        )
+        
+        path.closeSubpath()
+        
+        return path
     }
 }
