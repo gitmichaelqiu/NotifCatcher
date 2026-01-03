@@ -2,14 +2,16 @@ import Foundation
 import ApplicationServices
 import Cocoa
 import Combine
+import ScreenCaptureKit // Required for modern screenshot capturing
 
-// Updated struct to include resolved Icon
+// Updated struct to include resolved Icon AND Profile Photo
 struct CapturedNotification: Identifiable, Equatable {
     let id = UUID()
     let title: String
     let body: String
     let appName: String
     let icon: NSImage?
+    let profileImage: NSImage? // NEW: For capturing sender avatars
     let timestamp = Date()
 }
 
@@ -19,7 +21,6 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
     DispatchQueue.global(qos: .userInteractive).async {
-        // Increased delay to 0.15s to ensure full accessibility tree population
         usleep(150000)
         monitor.handleNewNotification(element: element)
     }
@@ -96,42 +97,43 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
+        // 1. Scan the tree to find text and the candidate element for the profile photo
         let content = scanAndDismiss(element)
         
         if !content.title.isEmpty || !content.body.isEmpty {
             let icon = resolveAppIcon(appName: content.appName)
             
-            DispatchQueue.main.async {
-                print("🔔 Captured: \(content.title) from \(content.appName)")
-                self.latestNotification = CapturedNotification(
+            // 2. Perform Async Snapshot (if a profile element was found)
+            Task {
+                var profileImg: NSImage? = nil
+                
+                if let profileElement = content.profileElement {
+                    profileImg = await captureSnapshot(of: profileElement)
+                }
+                
+                // 3. Update UI on Main Thread
+                let finalNotification = CapturedNotification(
                     title: content.title,
                     body: content.body,
                     appName: content.appName,
-                    icon: icon
+                    icon: icon,
+                    profileImage: profileImg
                 )
+                
+                DispatchQueue.main.async {
+                    print("🔔 Captured: \(finalNotification.title) from \(finalNotification.appName)")
+                    self.latestNotification = finalNotification
+                }
             }
         }
     }
     
     private func resolveAppIcon(appName: String) -> NSImage? {
-        print("[IconDebug] Resolving icon for appName: '\(appName)'")
+        guard !appName.isEmpty, appName != "System" else { return nil }
         
-        guard !appName.isEmpty, appName != "System" else {
-            print("[IconDebug] AppName is System/Empty. Skipping.")
-            return nil
-        }
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }) { return app.icon }
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName?.localizedCaseInsensitiveContains(appName) == true }) { return app.icon }
         
-        // 1. Exact Match
-        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }) {
-            return app.icon
-        }
-        
-        // 2. Case-Insensitive
-        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName?.localizedCaseInsensitiveContains(appName) == true }) {
-            return app.icon
-        }
-        
-        // 3. Manual Path Check
         let fileManager = FileManager.default
         let commonPaths = [
             "/Applications/\(appName).app",
@@ -141,24 +143,95 @@ class NotificationMonitor: ObservableObject {
         ]
         
         for path in commonPaths {
-            if fileManager.fileExists(atPath: path) {
-                return NSWorkspace.shared.icon(forFile: path)
-            }
+            if fileManager.fileExists(atPath: path) { return NSWorkspace.shared.icon(forFile: path) }
         }
-        
         return nil
     }
     
-    private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String) {
+    // NEW: Async capture using ScreenCaptureKit for modern macOS
+    private func captureSnapshot(of element: AXUIElement) async -> NSImage? {
+        // 1. Get Position (Sync AX API)
+        var posValue: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posValue)
+        
+        // 2. Get Size (Sync AX API)
+        var sizeValue: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
+        
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        
+        // Fix: Removed redundant 'as? AXValue' checks that caused warnings
+        if let pos = posValue { AXValueGetValue(pos as! AXValue, .cgPoint, &position) }
+        if let sz = sizeValue { AXValueGetValue(sz as! AXValue, .cgSize, &size) }
+        
+        // Validation
+        if size.width < 10 || size.height < 10 { return nil } // Ignore tiny elements
+        
+        // Construct the global screen rect for the element
+        let globalRect = CGRect(origin: position, size: size)
+        
+        // 3. Capture Strategy
+        if #available(macOS 14.0, *) {
+            return await captureViaScreenCaptureKit(rect: globalRect)
+        }
+        
+        // Fallback for older macOS versions is disabled due to API unavailability
+        return nil
+    }
+    
+    // Helper: Modern ScreenCaptureKit implementation
+    @available(macOS 14.0, *)
+    private func captureViaScreenCaptureKit(rect: CGRect) async -> NSImage? {
+        do {
+            let content = try await SCShareableContent.current
+            
+            // Find the display that contains the element
+            // We look for a display where the frame intersects our element's rect
+            guard let display = content.displays.first(where: { $0.frame.intersects(rect) }) else {
+                return nil
+            }
+            
+            let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+            let config = SCStreamConfiguration()
+            
+            // Convert Global Rect to Display-Local Rect
+            // SCK sourceRect is usually relative to the display's origin if filtering by display.
+            let localOrigin = CGPoint(x: rect.minX - display.frame.minX, y: rect.minY - display.frame.minY)
+            let localRect = CGRect(origin: localOrigin, size: rect.size)
+            
+            config.sourceRect = localRect
+            config.showsCursor = false
+            
+            // Handle Retina Scaling
+            // We use deviceDescription to find the NSScreen matching the SCDisplay ID
+            let scale = NSScreen.screens.first(where: { screen in
+                guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
+                return num.uint32Value == display.displayID
+            })?.backingScaleFactor ?? 2.0
+            
+            config.width = Int(rect.width * scale)
+            config.height = Int(rect.height * scale)
+            config.scalesToFit = true
+            
+            let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            return NSImage(cgImage: cgImage, size: rect.size)
+        } catch {
+            print("SCK Capture Error: \(error)")
+            return nil
+        }
+    }
+
+    // Refactored: Returns AXUIElement instead of NSImage to allow async processing
+    private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String, profileElement: AXUIElement?) {
         var titles: [String] = []
         var detectedAppName: String = "System"
+        var candidateProfileElement: AXUIElement? = nil
         var pendingDismissal: (() -> Void)? = nil
 
-        // Check Root Window Title
         var windowTitle: AnyObject?
         AXUIElementCopyAttributeValue(root, kAXTitleAttribute as CFString, &windowTitle)
         if let wTitle = windowTitle as? String {
-             print("[TreeDebug] Root Window Title: '\(wTitle)'")
             if wTitle != "Notification Center" && wTitle != "Window" && !wTitle.isEmpty {
                  detectedAppName = wTitle
             }
@@ -172,84 +245,70 @@ class NotificationMonitor: ObservableObject {
             guard res == .success, let list = children as? [AXUIElement] else { return }
 
             for child in list {
-                // 1. Role & Subrole
+                // 1. Role
                 var role: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
-                let roleStr = role as? String ?? "Unknown"
+                let roleStr = role as? String ?? ""
                 
-                var subrole: AnyObject?
-                AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
-                let subroleStr = subrole as? String ?? ""
-
-                // ENABLED DEBUG PRINT FOR DIAGNOSIS
-                print("[TreeDebug] Depth: \(depth) | Role: \(roleStr) | Subrole: \(subroleStr)")
-
-                // 2. Text Content
+                // 2. Text
                 if roleStr == "AXStaticText" {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
-                        print("[TreeDebug]    -> Text Value: '\(text)'")
                         titles.append(text)
                     }
                 }
                 
-                // 3. App Name Detection Strategy
-                
-                // Strategy A: AXImage Description or Title
+                // 3. App Name & Profile Photo Strategy
                 if roleStr == "AXImage" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
-                    if let descStr = desc as? String, !descStr.isEmpty {
-                        print("[IconDebug] Found AXImage Description: '\(descStr)'")
-                        detectedAppName = descStr
+                    let descStr = (desc as? String) ?? ""
+                    
+                    // Logic: If the image description matches the App Name, it's likely the App Icon.
+                    // If it does NOT match, it is a strong candidate for a profile photo.
+                    if !descStr.isEmpty && detectedAppName != "System" && descStr.localizedCaseInsensitiveContains(detectedAppName) {
+                        // Likely the App Icon
+                    } else {
+                        // Candidate for Profile Photo
+                        // We store the first valid candidate we find
+                        if candidateProfileElement == nil {
+                            // Basic check: Element must have a size (we check actual size in captureSnapshot)
+                            candidateProfileElement = child
+                        }
                     }
                     
-                    var title: AnyObject?
-                    AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
-                    if let titleStr = title as? String, !titleStr.isEmpty {
-                        print("[IconDebug] Found AXImage Title: '\(titleStr)'")
-                        if detectedAppName == "System" { detectedAppName = titleStr }
+                    // Fallback App Name detection
+                    if !descStr.isEmpty {
+                        if detectedAppName == "System" { detectedAppName = descStr }
                     }
                 }
                 
-                // Strategy B: AXButton Description/Title
                 if roleStr == "AXButton" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
-                    if let descStr = desc as? String, !descStr.isEmpty, descStr != "Close", descStr != "Clear", descStr != "Actions" {
-                        print("[IconDebug] Found AXButton Description: '\(descStr)'")
-                        detectedAppName = descStr
+                    if let descStr = desc as? String, !descStr.isEmpty, !["Close", "Clear", "Actions"].contains(descStr) {
+                         detectedAppName = descStr
                     }
                 }
                 
-                // Strategy C: AXGroup Description (UPDATED to parse "AppName, Title, Body")
                 if roleStr == "AXGroup" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
                     if let descStr = desc as? String, !descStr.isEmpty {
-                        print("[GroupDebug] AXGroup Description: '\(descStr)'")
-                        
-                        // Case 1: "Notification from AppName"
                         if descStr.hasPrefix("Notification from ") {
                             detectedAppName = String(descStr.dropFirst(18))
-                        }
-                        // Case 2: "AppName, Title, Body" (matches "Discord, MickyMike, wowowow")
-                        else if descStr.contains(", ") {
+                        } else if descStr.contains(", ") {
                             let components = descStr.components(separatedBy: ", ")
-                            // Heuristic: The first component is likely the App Name
-                            if let first = components.first, !first.isEmpty {
-                                detectedAppName = first
-                            }
+                            if let first = components.first, !first.isEmpty { detectedAppName = first }
                         }
                     }
                 }
 
-                // 4. Dismissal Logic
+                // 4. Dismissal
                 if pendingDismissal == nil {
                     var actionNames: CFArray?
                     AXUIElementCopyActionNames(child, &actionNames)
-                    
                     if let names = actionNames as? [String] {
                          if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
                              pendingDismissal = { _ = AXUIElementPerformAction(child, closeAction as CFString) }
@@ -257,21 +316,7 @@ class NotificationMonitor: ObservableObject {
                              pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
                          }
                     }
-                    
-                    if pendingDismissal == nil && subroleStr == "AXNotificationCenterBanner" {
-                         pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
-                    }
-                    
-                    if pendingDismissal == nil && roleStr == "AXButton" {
-                        var title: AnyObject?
-                        AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
-                        let titleStr = title as? String ?? ""
-                        if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
-                            pendingDismissal = { _ = AXUIElementPerformAction(child, kAXPressAction as CFString) }
-                        }
-                    }
                 }
-                
                 crawl(child, depth: depth + 1)
             }
         }
@@ -279,13 +324,11 @@ class NotificationMonitor: ObservableObject {
         crawl(root, depth: 0)
         
         if let dismissal = pendingDismissal {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) {
-                dismissal()
-            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { dismissal() }
         }
         
         let t = titles.first ?? "New Notification"
         let b = titles.count > 1 ? titles[1] : ""
-        return (t, b, detectedAppName)
+        return (t, b, detectedAppName, candidateProfileElement)
     }
 }
