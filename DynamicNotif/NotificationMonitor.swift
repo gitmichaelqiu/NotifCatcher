@@ -18,9 +18,8 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
     DispatchQueue.global(qos: .userInteractive).async {
-        // OPTIMIZATION: Reduced latency from 0.1s (100000) to 0.01s (10000)
-        // This minimizes the time the system banner is visible before we kill it.
-        usleep(10000)
+        // OPTIMIZATION: Removed usleep entirely.
+        // We now process immediately to kill the banner as fast as possible.
         monitor.handleNewNotification(element: element)
     }
 }
@@ -109,16 +108,10 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
-        // 1. FAST READ: Grab text immediately
-        let (title, body) = extractText(from: element)
+        // COMBINED PASS: Extract text and dismiss in a single tree traversal.
+        // This is significantly faster than doing two separate passes.
+        let (title, body) = scanAndDismiss(element)
         
-        // 2. FAST KILL: Trigger dismissal immediately on background thread
-        // We don't wait for UI updates to finish before killing the system banner.
-        DispatchQueue.global(qos: .userInteractive).async {
-            self.attemptDismiss(element: element)
-        }
-        
-        // 3. UPDATE UI: Show our custom banner
         if !title.isEmpty || !body.isEmpty {
             DispatchQueue.main.async {
                 print("🔔 Captured: \(title) - \(body)")
@@ -127,111 +120,82 @@ class NotificationMonitor: ObservableObject {
         }
     }
     
-    // OPTIMIZED: Faster dismissal by targeting the specific banner component
-    private func attemptDismiss(element: AXUIElement) {
-        // Perform a targeted crawl. We know the "Close" action lives on the 'AXNotificationCenterBanner'
-        // or a child with 'AXCloseButton'. We stop as soon as we succeed.
-        _ = fastCrawlAndDismiss(element, depth: 0)
-    }
-
-    private func performPress(element: AXUIElement) {
-        _ = AXUIElementPerformAction(element, kAXPressAction as CFString)
-    }
-    
-    private func performCancel(element: AXUIElement) {
-        _ = AXUIElementPerformAction(element, kAXCancelAction as CFString)
-    }
-
-    // Returns true if dismissed, to stop further searching
-    private func fastCrawlAndDismiss(_ el: AXUIElement, depth: Int) -> Bool {
-        // Optimization: Don't go too deep
-        if depth > 5 { return false }
-
-        var children: AnyObject?
-        let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
-        guard res == .success, let list = children as? [AXUIElement] else { return false }
-        
-        for child in list {
-            var subrole: AnyObject?
-            AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
-            let subroleStr = subrole as? String ?? ""
-
-            // CHECK ACTIONS (Priority)
-            // We check actions on every node because sometimes the wrapper has the action
-            var actionNames: CFArray?
-            AXUIElementCopyActionNames(child, &actionNames)
-            
-            if let names = actionNames as? [String] {
-                // 1. Look for explicit "Close" action (found in logs earlier)
-                if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
-                    let err = AXUIElementPerformAction(child, closeAction as CFString)
-                    if err == .success { return true }
-                }
-                
-                // 2. Look for Cancel
-                if names.contains("AXCancel") {
-                    performCancel(element: child)
-                    return true
-                }
-            }
-
-            // CHECK SUBROLE (Targeting the Banner Group)
-            // If this is the banner, and we haven't found a named action, try blind cancel
-            if subroleStr == "AXNotificationCenterBanner" {
-                // Attempt blind cancel just in case
-                let err = AXUIElementPerformAction(child, kAXCancelAction as CFString)
-                if err == .success { return true }
-            }
-            
-            // CHECK BUTTONS (Traditional Close Button)
-            var role: AnyObject?
-            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
-            let roleStr = role as? String ?? ""
-            
-            if roleStr == "AXButton" {
-                var title: AnyObject?
-                AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
-                let titleStr = title as? String ?? ""
-                
-                if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
-                    performPress(element: child)
-                    return true
-                }
-            }
-            
-            // Recurse
-            if fastCrawlAndDismiss(child, depth: depth + 1) {
-                return true
-            }
-        }
-        return false
-    }
-    
-    private func extractText(from element: AXUIElement) -> (String, String) {
+    // Single-pass optimized scanner: Reads content AND kills the banner simultaneously
+    private func scanAndDismiss(_ root: AXUIElement) -> (String, String) {
         var titles: [String] = []
-        
-        func crawl(_ el: AXUIElement) {
+        var dismissed = false
+
+        func crawl(_ el: AXUIElement, depth: Int) {
+            if depth > 5 { return } // Depth limit optimization
+
             var children: AnyObject?
-            AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
-            
-            if let list = children as? [AXUIElement] {
-                for child in list {
-                    var role: AnyObject?
-                    AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
-                    
-                    if let r = role as? String, r == "AXStaticText" {
-                        var val: AnyObject?
-                        AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
-                        if let text = val as? String, !text.isEmpty {
-                            titles.append(text)
+            let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
+            guard res == .success, let list = children as? [AXUIElement] else { return }
+
+            for child in list {
+                // 1. GET BASIC ATTRIBUTES (Role is needed for both text and buttons)
+                var role: AnyObject?
+                AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+                let roleStr = role as? String ?? ""
+
+                // 2. CHECK FOR TEXT
+                if roleStr == "AXStaticText" {
+                    var val: AnyObject?
+                    AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
+                    if let text = val as? String, !text.isEmpty {
+                        titles.append(text)
+                    }
+                }
+
+                // 3. CHECK FOR DISMISSAL (If not already killed)
+                if !dismissed {
+                    var subrole: AnyObject?
+                    AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
+                    let subroleStr = subrole as? String ?? ""
+
+                    // Check Actions (Expensive IPC, so only check promising elements)
+                    if subroleStr == "AXNotificationCenterBanner" || roleStr == "AXGroup" || roleStr == "AXButton" {
+                        var actionNames: CFArray?
+                        AXUIElementCopyActionNames(child, &actionNames)
+                        
+                        if let names = actionNames as? [String] {
+                            // Look for explicit "Close" action
+                            if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
+                                _ = AXUIElementPerformAction(child, closeAction as CFString)
+                                dismissed = true
+                            } else if names.contains("AXCancel") {
+                                _ = AXUIElementPerformAction(child, kAXCancelAction as CFString)
+                                dismissed = true
+                            }
                         }
                     }
-                    crawl(child)
+
+                    // Backup: Blind Cancel on Banner
+                    if !dismissed && subroleStr == "AXNotificationCenterBanner" {
+                        let err = AXUIElementPerformAction(child, kAXCancelAction as CFString)
+                        if err == .success { dismissed = true }
+                    }
+
+                    // Backup: Standard Close Button
+                    if !dismissed && roleStr == "AXButton" {
+                        var title: AnyObject?
+                        AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
+                        let titleStr = title as? String ?? ""
+                        
+                        if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
+                            _ = AXUIElementPerformAction(child, kAXPressAction as CFString)
+                            dismissed = true
+                        }
+                    }
                 }
+                
+                // 4. RECURSE
+                crawl(child, depth: depth + 1)
             }
         }
         
-        crawl(element)
+        crawl(root, depth: 0)
+        
         let t = titles.first ?? "New Notification"
         let b = titles.count > 1 ? titles[1] : ""
         return (t, b)
