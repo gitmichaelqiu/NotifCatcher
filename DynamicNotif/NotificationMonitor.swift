@@ -3,24 +3,23 @@ import ApplicationServices
 import Cocoa
 import Combine
 
-// A simple struct to hold notification data
+// Updated struct to include resolved Icon
 struct CapturedNotification: Identifiable, Equatable {
     let id = UUID()
     let title: String
     let body: String
     let appName: String
+    let icon: NSImage? // Added icon support
     let timestamp = Date()
 }
 
-// Global C-style callback function for the Accessibility API
+// Global C-style callback
 func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
     guard let refcon = refcon else { return }
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
     DispatchQueue.global(qos: .userInteractive).async {
-        // DELAY FIX: The system needs a tiny moment to populate the text fields
-        // inside the new window. 20ms is the sweet spot (undetectable lag, reliable data).
-        usleep(100000)
+        usleep(100000) // 100ms delay for UI population
         monitor.handleNewNotification(element: element)
     }
 }
@@ -49,12 +48,9 @@ class NotificationMonitor: ObservableObject {
             return
         }
         
-        // ROBUST PID FINDING
         guard let pid = findNotificationCenterPID() else {
             print("❌ Could not find Notification Center PID")
-            DispatchQueue.main.async {
-                self.errorMessage = "Could not find 'NotificationCenter'.\nIs the Sandbox disabled in Project Settings?"
-            }
+            DispatchQueue.main.async { self.errorMessage = "Could not find 'NotificationCenter'." }
             return
         }
         
@@ -64,9 +60,6 @@ class NotificationMonitor: ObservableObject {
         
         guard AXObserverCreate(pid, observerCallback, &observer) == .success, let axObserver = observer else {
             print("❌ Failed to create AXObserver")
-            DispatchQueue.main.async {
-                self.errorMessage = "Failed to create Observer.\nTry removing the App from Accessibility settings and re-adding it."
-            }
             return
         }
         
@@ -75,13 +68,9 @@ class NotificationMonitor: ObservableObject {
         let appElement = AXUIElementCreateApplication(pid)
         AXObserverAddNotification(axObserver, appElement, kAXWindowCreatedNotification as CFString, selfPointer)
         
-        DispatchQueue.main.async {
-            self.isListening = true
-        }
-        print("👂 Monitoring started...")
+        DispatchQueue.main.async { self.isListening = true }
     }
     
-    // Helper: Finds PID using /usr/bin/pgrep
     private func findNotificationCenterPID() -> pid_t? {
         let task = Process()
         let pipe = Pipe()
@@ -97,50 +86,70 @@ class NotificationMonitor: ObservableObject {
                let pid = Int32(output) {
                 return pid
             }
-        } catch {
-            print("Pgrep failed: \(error)")
-        }
+        } catch { }
 
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.NotificationCenter" }) {
             return app.processIdentifier
+        }
+        return nil
+    }
+    
+    func handleNewNotification(element: AXUIElement) {
+        // Extract content including App Name
+        let content = scanAndDismiss(element)
+        
+        if !content.title.isEmpty || !content.body.isEmpty {
+            // Resolve Icon
+            let icon = resolveAppIcon(appName: content.appName)
+            
+            DispatchQueue.main.async {
+                print("🔔 Captured: \(content.title) from \(content.appName)")
+                self.latestNotification = CapturedNotification(
+                    title: content.title,
+                    body: content.body,
+                    appName: content.appName,
+                    icon: icon
+                )
+            }
+        }
+    }
+    
+    private func resolveAppIcon(appName: String) -> NSImage? {
+        guard !appName.isEmpty, appName != "System" else { return nil }
+        
+        // 1. Try to find running app by name
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }) {
+            return app.icon
+        }
+        
+        // 2. Try to find app path by name
+        if let path = NSWorkspace.shared.fullPath(forApplication: appName) {
+            return NSWorkspace.shared.icon(forFile: path)
         }
         
         return nil
     }
     
-    func handleNewNotification(element: AXUIElement) {
-        // COMBINED PASS: Extract text first, THEN dismiss.
-        let (title, body) = scanAndDismiss(element)
-        
-        if !title.isEmpty || !body.isEmpty {
-            DispatchQueue.main.async {
-                print("🔔 Captured: \(title) - \(body)")
-                self.latestNotification = CapturedNotification(title: title, body: body, appName: "System")
-            }
-        }
-    }
-    
-    // Single-pass optimized scanner: Reads content AND identifies killer action
-    private func scanAndDismiss(_ root: AXUIElement) -> (String, String) {
+    // Updated scanner to find App Name via Image Description
+    private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String) {
         var titles: [String] = []
-        // We store the dismissal action to execute it AFTER reading text.
-        // This prevents the window from closing while we are trying to read it.
+        var detectedAppName: String = "System"
         var pendingDismissal: (() -> Void)? = nil
 
         func crawl(_ el: AXUIElement, depth: Int) {
-            if depth > 5 { return } // Depth limit optimization
+            if depth > 5 { return }
 
             var children: AnyObject?
             let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
             guard res == .success, let list = children as? [AXUIElement] else { return }
 
             for child in list {
-                // 1. GET BASIC ATTRIBUTES
+                // 1. Attributes
                 var role: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
                 let roleStr = role as? String ?? ""
 
-                // 2. CHECK FOR TEXT
+                // 2. Text
                 if roleStr == "AXStaticText" {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
@@ -148,20 +157,27 @@ class NotificationMonitor: ObservableObject {
                         titles.append(text)
                     }
                 }
+                
+                // 3. App Name (via Icon Description)
+                // macOS notifications usually contain an AXImage where the description is the App Name
+                if roleStr == "AXImage" {
+                    var desc: AnyObject?
+                    AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
+                    if let descStr = desc as? String, !descStr.isEmpty {
+                        detectedAppName = descStr
+                    }
+                }
 
-                // 3. IDENTIFY DISMISSAL (If not already found)
+                // 4. Dismissal Logic (Same as before)
                 if pendingDismissal == nil {
                     var subrole: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
                     let subroleStr = subrole as? String ?? ""
 
-                    // Check Actions
                     if subroleStr == "AXNotificationCenterBanner" || roleStr == "AXGroup" || roleStr == "AXButton" {
                         var actionNames: CFArray?
                         AXUIElementCopyActionNames(child, &actionNames)
-                        
                         if let names = actionNames as? [String] {
-                            // Look for explicit "Close" action
                             if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
                                 pendingDismissal = { _ = AXUIElementPerformAction(child, closeAction as CFString) }
                             } else if names.contains("AXCancel") {
@@ -169,37 +185,17 @@ class NotificationMonitor: ObservableObject {
                             }
                         }
                     }
-
-                    // Backup: Blind Cancel on Banner
-                    if pendingDismissal == nil && subroleStr == "AXNotificationCenterBanner" {
-                        pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
-                    }
-
-                    // Backup: Standard Close Button
-                    if pendingDismissal == nil && roleStr == "AXButton" {
-                        var title: AnyObject?
-                        AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
-                        let titleStr = title as? String ?? ""
-                        
-                        if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
-                            pendingDismissal = { _ = AXUIElementPerformAction(child, kAXPressAction as CFString) }
-                        }
-                    }
                 }
                 
-                // 4. RECURSE
                 crawl(child, depth: depth + 1)
             }
         }
         
         crawl(root, depth: 0)
-        
-        // EXECUTE KILL
-        // Only now, after we have (hopefully) read the text, do we execute the kill switch.
         pendingDismissal?()
         
         let t = titles.first ?? "New Notification"
         let b = titles.count > 1 ? titles[1] : ""
-        return (t, b)
+        return (t, b, detectedAppName)
     }
 }

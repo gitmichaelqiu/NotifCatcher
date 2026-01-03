@@ -195,17 +195,27 @@ struct DynamicIslandContainer: View {
                 HStack(spacing: 12) {
                     // LEFT: Icon
                     ZStack {
-                        Circle()
-                            .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .top, endPoint: .bottom))
-                            .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
-                            .opacity(isExpanded ? 1 : 0)
-                        
-                        Image(systemName: "bell.badge.fill")
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 18, height: 18)
-                            .foregroundColor(.white)
-                            .opacity(isExpanded ? 1 : 0)
+                        if let appIcon = notification.icon {
+                            Image(nsImage: appIcon)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
+                                .clipShape(Circle())
+                                .opacity(isExpanded ? 1 : 0)
+                        } else {
+                            // Fallback Icon
+                            Circle()
+                                .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .top, endPoint: .bottom))
+                                .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
+                                .opacity(isExpanded ? 1 : 0)
+                            
+                            Image(systemName: "bell.badge.fill")
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 18, height: 18)
+                                .foregroundColor(.white)
+                                .opacity(isExpanded ? 1 : 0)
+                        }
                     }
                     
                     // CENTER: Text Info
@@ -236,7 +246,7 @@ struct DynamicIslandContainer: View {
                         }
                     }
                 }
-                .padding(.horizontal, 20) // Extra padding to clear the "flare"
+                .padding(.horizontal, 30) // Extra padding to clear the "flare"
                 .padding(.top, 14) // Push down from menu bar
                 .frame(height: isExpanded ? expandedHeight : startHeight, alignment: .top)
                 .opacity(isExpanded ? 1 : 0)
