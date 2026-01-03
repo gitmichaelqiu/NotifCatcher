@@ -108,7 +108,11 @@ class NotificationMonitor: ObservableObject {
                 var profileImg: NSImage? = nil
                 
                 if let profileElement = content.profileElement {
+                    print("[SnapshotDebug] Starting async snapshot capture...")
                     profileImg = await captureSnapshot(of: profileElement)
+                    print("[SnapshotDebug] Snapshot result: \(profileImg == nil ? "Failed" : "Success")")
+                } else {
+                    print("[SnapshotDebug] No profile element candidate found.")
                 }
                 
                 // 3. Update UI on Main Thread
@@ -165,8 +169,13 @@ class NotificationMonitor: ObservableObject {
         if let pos = posValue { AXValueGetValue(pos as! AXValue, .cgPoint, &position) }
         if let sz = sizeValue { AXValueGetValue(sz as! AXValue, .cgSize, &size) }
         
+        print("[SnapshotDebug] Element found at \(position.x),\(position.y) with size \(size.width)x\(size.height)")
+        
         // Validation
-        if size.width < 10 || size.height < 10 { return nil } // Ignore tiny elements
+        if size.width < 10 || size.height < 10 {
+            print("[SnapshotDebug] -> Element too small (<10px). Skipping.")
+            return nil
+        }
         
         // Construct the global screen rect for the element
         let globalRect = CGRect(origin: position, size: size)
@@ -176,7 +185,7 @@ class NotificationMonitor: ObservableObject {
             return await captureViaScreenCaptureKit(rect: globalRect)
         }
         
-        // Fallback for older macOS versions is disabled due to API unavailability
+        print("[SnapshotDebug] -> macOS version too old for ScreenCaptureKit.")
         return nil
     }
     
@@ -189,6 +198,7 @@ class NotificationMonitor: ObservableObject {
             // Find the display that contains the element
             // We look for a display where the frame intersects our element's rect
             guard let display = content.displays.first(where: { $0.frame.intersects(rect) }) else {
+                print("[SnapshotDebug] SCK: No display found intersecting rect: \(rect)")
                 return nil
             }
             
@@ -217,7 +227,7 @@ class NotificationMonitor: ObservableObject {
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
             return NSImage(cgImage: cgImage, size: rect.size)
         } catch {
-            print("SCK Capture Error: \(error)")
+            print("[SnapshotDebug] SCK Capture Error: \(error)")
             return nil
         }
     }
@@ -232,13 +242,14 @@ class NotificationMonitor: ObservableObject {
         var windowTitle: AnyObject?
         AXUIElementCopyAttributeValue(root, kAXTitleAttribute as CFString, &windowTitle)
         if let wTitle = windowTitle as? String {
+             print("[TreeDebug] Root Window Title: '\(wTitle)'")
             if wTitle != "Notification Center" && wTitle != "Window" && !wTitle.isEmpty {
                  detectedAppName = wTitle
             }
         }
 
         func crawl(_ el: AXUIElement, depth: Int) {
-            if depth > 8 { return }
+            if depth > 10 { return }
 
             var children: AnyObject?
             let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
@@ -248,13 +259,22 @@ class NotificationMonitor: ObservableObject {
                 // 1. Role
                 var role: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
-                let roleStr = role as? String ?? ""
+                let roleStr = role as? String ?? "Unknown"
                 
+                var subrole: AnyObject?
+                AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
+                let subroleStr = subrole as? String ?? "Unknown"
+
+                // --- TREE DEBUG PRINT ---
+                // This will help us find where the profile image is hiding!
+                print("[TreeDebug] Depth: \(depth) | Role: \(roleStr) | Subrole: \(subroleStr)")
+
                 // 2. Text
                 if roleStr == "AXStaticText" {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
+                        print("[TreeDebug]    -> Text: \(text)")
                         titles.append(text)
                     }
                 }
@@ -265,15 +285,17 @@ class NotificationMonitor: ObservableObject {
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
                     let descStr = (desc as? String) ?? ""
                     
+                    print("[TreeDebug]    -> Image Desc: '\(descStr)'")
+                    
                     // Logic: If the image description matches the App Name, it's likely the App Icon.
                     // If it does NOT match, it is a strong candidate for a profile photo.
                     if !descStr.isEmpty && detectedAppName != "System" && descStr.localizedCaseInsensitiveContains(detectedAppName) {
-                        // Likely the App Icon
+                        print("[SnapshotDebug] -> Matches AppName. Likely App Icon.")
                     } else {
                         // Candidate for Profile Photo
                         // We store the first valid candidate we find
                         if candidateProfileElement == nil {
-                            // Basic check: Element must have a size (we check actual size in captureSnapshot)
+                            print("[SnapshotDebug] -> Candidate found (AXImage)")
                             candidateProfileElement = child
                         }
                     }
@@ -287,8 +309,11 @@ class NotificationMonitor: ObservableObject {
                 if roleStr == "AXButton" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
-                    if let descStr = desc as? String, !descStr.isEmpty, !["Close", "Clear", "Actions"].contains(descStr) {
-                         detectedAppName = descStr
+                    let descStr = (desc as? String) ?? ""
+                    
+                    if !descStr.isEmpty && !["Close", "Clear", "Actions", "Reply", "Mute"].contains(descStr) {
+                         // Potentially update app name if we haven't found one
+                         if detectedAppName == "System" { detectedAppName = descStr }
                     }
                 }
                 
@@ -296,6 +321,7 @@ class NotificationMonitor: ObservableObject {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
                     if let descStr = desc as? String, !descStr.isEmpty {
+                        print("[TreeDebug]    -> Group Desc: \(descStr)")
                         if descStr.hasPrefix("Notification from ") {
                             detectedAppName = String(descStr.dropFirst(18))
                         } else if descStr.contains(", ") {
@@ -315,6 +341,17 @@ class NotificationMonitor: ObservableObject {
                          } else if names.contains("AXCancel") {
                              pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
                          }
+                    }
+                    if pendingDismissal == nil && subroleStr == "AXNotificationCenterBanner" {
+                         pendingDismissal = { _ = AXUIElementPerformAction(child, kAXCancelAction as CFString) }
+                    }
+                    if pendingDismissal == nil && roleStr == "AXButton" {
+                        var title: AnyObject?
+                        AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &title)
+                        let titleStr = title as? String ?? ""
+                        if subroleStr == "AXCloseButton" || titleStr == "Close" || titleStr == "Clear" {
+                            pendingDismissal = { _ = AXUIElementPerformAction(child, kAXPressAction as CFString) }
+                        }
                     }
                 }
                 crawl(child, depth: depth + 1)
