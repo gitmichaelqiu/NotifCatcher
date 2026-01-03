@@ -47,7 +47,7 @@ class NotificationMonitor: ObservableObject {
             return
         }
         
-        // ROBUST PID FINDING (Reverted to Shell method which is more reliable for 'hacker' tools)
+        // ROBUST PID FINDING
         guard let pid = findNotificationCenterPID() else {
             print("❌ Could not find Notification Center PID")
             DispatchQueue.main.async {
@@ -79,15 +79,12 @@ class NotificationMonitor: ObservableObject {
         print("👂 Monitoring started...")
     }
     
-    // Helper: Finds PID using /usr/bin/pgrep (Reliable) or NSWorkspace (Fallback)
+    // Helper: Finds PID using /usr/bin/pgrep
     private func findNotificationCenterPID() -> pid_t? {
-        // Attempt 1: The "Hacker" way (Shell/pgrep)
-        // We use absolute path /usr/bin/pgrep because $PATH might not be set in Xcode apps.
         let task = Process()
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = pipe
-        // Explicitly point to the binary to avoid PATH issues
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         task.arguments = ["-x", "NotificationCenter"]
         
@@ -102,7 +99,6 @@ class NotificationMonitor: ObservableObject {
             print("Pgrep failed: \(error)")
         }
 
-        // Attempt 2: Native NSWorkspace (Fallback - usually only works if NC has a visible window)
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.NotificationCenter" }) {
             return app.processIdentifier
         }
@@ -118,6 +114,104 @@ class NotificationMonitor: ObservableObject {
                 print("🔔 Captured: \(title) - \(body)")
                 self.latestNotification = CapturedNotification(title: title, body: body, appName: "System")
             }
+            
+            self.attemptDismiss(element: element)
+        }
+    }
+    
+    // UPDATED: Dismissal with ACTION INSPECTION
+    private func attemptDismiss(element: AXUIElement) {
+        // Strategy 1: Check for the Standard Window Close Button Attribute
+        var closeButtonRef: AnyObject?
+        let result = AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &closeButtonRef)
+        
+        if result == .success, let closeButton = closeButtonRef {
+            let closeEl = closeButton as! AXUIElement
+            print("   🎯 Found Standard Close Button via Attribute.")
+            performPress(element: closeEl)
+            return
+        }
+        
+        // Strategy 2: Deep recursive crawl looking for Actions
+        print("   ⚠️ Standard attribute failed. Scanning for Actions & Hidden buttons...")
+        crawlAndDismiss(element, depth: 0)
+    }
+
+    private func performPress(element: AXUIElement) {
+        let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        if error == .success {
+            print("   ✨ Dismissed successfully (AXPress)")
+        } else {
+            print("   ⚠️ Failed to press: \(error.rawValue)")
+        }
+    }
+    
+    private func performCancel(element: AXUIElement) {
+        let error = AXUIElementPerformAction(element, kAXCancelAction as CFString)
+        if error == .success {
+            print("   ✨ Dismissed successfully (AXCancel)")
+        } else {
+            print("   ⚠️ Failed to cancel: \(error.rawValue)")
+        }
+    }
+
+    private func crawlAndDismiss(_ el: AXUIElement, depth: Int) {
+        var children: AnyObject?
+        let res = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children)
+        
+        guard res == .success, let list = children as? [AXUIElement] else {
+            return
+        }
+        
+        for child in list {
+            var role: AnyObject?
+            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+            let roleStr = role as? String ?? "Unknown"
+            
+            var subrole: AnyObject?
+            AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
+            let subroleStr = subrole as? String ?? ""
+
+            // DEBUG LOGGING: Show the tree structure
+            let indent = String(repeating: " ", count: depth * 2)
+            print("\(indent)➡️ [\(roleStr)] Subrole:'\(subroleStr)'")
+            
+            // CHECK ACTIONS
+            var actionNames: CFArray?
+            AXUIElementCopyActionNames(child, &actionNames)
+            if let names = actionNames as? [String] {
+                print("\(indent)   ⚡️ Actions: \(names)")
+                
+                // STRATEGY UPDATE: Look for ANY action containing "Close"
+                // Your logs showed: "Name:Close\nTarget:0x0..."
+                if let closeAction = names.first(where: { $0.localizedCaseInsensitiveContains("Close") }) {
+                    print("\(indent)   🔥 Found Explicit Close Action: '\(closeAction)'")
+                    let err = AXUIElementPerformAction(child, closeAction as CFString)
+                    if err == .success {
+                        print("\(indent)   ✨ Executed Close Action Successfully!")
+                        return
+                    } else {
+                         print("\(indent)   ⚠️ Failed to execute action: \(err.rawValue)")
+                    }
+                }
+                
+                // Fallback: AXCancel
+                if names.contains("AXCancel") {
+                    print("\(indent)   🔥 Found AXCancel! Executing...")
+                    performCancel(element: child)
+                    // Don't return here immediately, in case the explicit Close is better
+                }
+            }
+
+            // CHECK 1: Explicit AXCloseButton
+            if (roleStr == "AXButton" && subroleStr == "AXCloseButton") {
+                print("\(indent)   🔥 MATCH! Clicking Button...")
+                performPress(element: child)
+                return
+            }
+            
+            // Recurse
+            crawlAndDismiss(child, depth: depth + 1)
         }
     }
     
