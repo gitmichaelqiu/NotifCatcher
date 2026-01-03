@@ -105,9 +105,10 @@ class FloatingNotificationManager: ObservableObject {
         // 3. Position: Top Right of Main Screen
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
-            // Position 20px from right, near the top (below menu bar)
-            let xPos = visibleFrame.maxX - 420 // Width (380) + Padding
-            let yPos = visibleFrame.maxY - 120  // Height + Padding
+            // Position from right, near the top (flush below menu bar)
+            // visibleFrame.maxY is the bottom edge of the menu bar.
+            let xPos = visibleFrame.maxX - 400 // Width + Padding
+            let yPos = visibleFrame.maxY - 120  // Height of our window (120)
             
             panel.setFrameOrigin(NSPoint(x: xPos, y: yPos))
         }
@@ -161,32 +162,32 @@ struct DynamicIslandContainer: View {
                 ZStack {
                     Circle()
                         .fill(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: isExpanded ? 40 : 10, height: isExpanded ? 40 : 10)
+                        .frame(width: isExpanded ? 36 : 10, height: isExpanded ? 36 : 10)
                         .opacity(isExpanded ? 1 : 0)
                     
                     Image(systemName: "bell.badge.fill")
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 20, height: 20)
+                        .frame(width: 18, height: 18)
                         .foregroundColor(.white)
                         .opacity(isExpanded ? 1 : 0)
                 }
-                .frame(width: isExpanded ? 50 : 0)
+                .frame(width: isExpanded ? 46 : 0)
                 .clipped()
                 
                 // CENTER: Text
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(notification.title)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .opacity(isExpanded ? 1 : 0)
-                        .scaleEffect(isExpanded ? 1 : 0.8, anchor: .leading)
+                        .scaleEffect(isExpanded ? 1 : 0.8, anchor: .topLeading)
                     
                     if !notification.body.isEmpty {
                         Text(notification.body)
                             .font(.system(size: 13, weight: .regular))
-                            .foregroundColor(.white.opacity(0.8))
+                            .foregroundColor(.white.opacity(0.85))
                             .lineLimit(2)
                             .opacity(isExpanded ? 1 : 0)
                     }
@@ -200,19 +201,21 @@ struct DynamicIslandContainer: View {
                     Text("Now")
                         .font(.caption2)
                         .foregroundColor(.gray)
-                        .padding(.leading, 10)
+                        .padding(.leading, 8)
                 }
             }
-            .padding(.horizontal, isExpanded ? 16 : 0)
-            .padding(.vertical, isExpanded ? 16 : 0)
-            .frame(width: isExpanded ? 380 : 40, height: isExpanded ? 90 : 12)
+            .padding(.horizontal, isExpanded ? 14 : 0)
+            .padding(.vertical, isExpanded ? 14 : 0)
+            // STYLE UPDATE: Start very small (width 60, height 0) to mimic expanding from the bar
+            .frame(width: isExpanded ? 340 : 60, height: isExpanded ? 80 : 0)
             .background(
                 Color.black // Solid black as requested
-                    .shadow(color: .black.opacity(0.3), radius: 15, x: 0, y: 5)
+                    .shadow(color: .black.opacity(0.4), radius: 12, x: 0, y: 4)
             )
-            .clipShape(RoundedRectangle(cornerRadius: isExpanded ? 40 : 20, style: .continuous))
-            .padding(.top, 10)
-            .padding(.trailing, 10)
+            // STYLE UPDATE: Animate corner radius to look like it morphs out
+            .clipShape(RoundedRectangle(cornerRadius: isExpanded ? 22 : 4, style: .continuous))
+            .padding(.top, 0) // TOUCH THE MENU BAR (No gap)
+            .padding(.trailing, 16) // Padding from the right screen edge
             .onTapGesture {
                 print("[Debug] User tapped notification")
                 dismiss()
@@ -225,13 +228,14 @@ struct DynamicIslandContainer: View {
             // Sequence the animation
             
             // 1. Fade In
-            withAnimation(.easeIn(duration: 0.2)) {
+            withAnimation(.easeIn(duration: 0.15)) {
                 viewOpacity = 1.0
             }
             
             // 2. Expand
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                withAnimation(.interactiveSpring(response: 0.6, dampingFraction: 0.7)) {
+            // Small delay to ensure the opacity has started before expanding
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                withAnimation(.interactiveSpring(response: 0.5, dampingFraction: 0.7, blendDuration: 0.2)) {
                     islandState = .expanded
                 }
             }
@@ -247,18 +251,18 @@ struct DynamicIslandContainer: View {
     private func dismiss() {
         print("[Debug] Dismiss animation started for ID: \(notification.id)")
         // 1. Shrink Animation
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             islandState = .idle
         }
         
         // 2. Fade Out Animation (Simultaneous)
         // Removing the delay ensures that if it shrinks to a capsule, it's already invisible
-        withAnimation(.easeOut(duration: 0.3)) {
+        withAnimation(.easeOut(duration: 0.25)) {
             viewOpacity = 0
         }
         
         // 3. Tell the window manager to hide the panel after animation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             onDismiss()
         }
     }
