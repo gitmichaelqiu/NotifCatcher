@@ -102,6 +102,7 @@ class FloatingNotificationManager: ObservableObject {
         p.hasShadow = false
         p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.acceptsMouseMovedEvents = true // Important for hover/scroll detection
         
         // Start hidden completely
         p.orderOut(nil)
@@ -125,7 +126,7 @@ class FloatingNotificationManager: ObservableObject {
             // Content is centered in Window -> Side Margins = (450 - 380) / 2 = 35px.
             // Desired Visual Right Gap = 21.
             // Window Right Gap = Desired Visual Gap - Side Margin = 21 - 35 = -14.
-            // User requested explicit padding of -35
+            // User requested explicit padding of -35 (Overriding math)
             let rightPadding: CGFloat = -35
             
             let xPos = visibleFrame.maxX - windowWidth - rightPadding
@@ -176,6 +177,7 @@ struct DynamicIslandContainer: View {
     
     @State private var isExpanded: Bool = false
     @State private var isVisible: Bool = false
+    @State private var eventMonitor: Any? = nil
     
     private let springAnim = Animation.interpolatingSpring(mass: 0.5, stiffness: 200, damping: 18, initialVelocity: 0.5)
     
@@ -274,16 +276,6 @@ struct DynamicIslandContainer: View {
             .onTapGesture {
                 openApp()
             }
-            // Add Scroll/Swipe Up Gesture to Collapse
-            .gesture(
-                DragGesture(minimumDistance: 15, coordinateSpace: .local)
-                    .onEnded { value in
-                        // Negative height means upward swipe/scroll
-                        if value.translation.height < -15 {
-                            dismissSequence()
-                        }
-                    }
-            )
             .padding(.top, 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -291,6 +283,31 @@ struct DynamicIslandContainer: View {
         .id(notification.id)
         .onAppear {
             runPresentationSequence()
+            
+            // Monitor local scroll events
+            // This captures scroll/swipe events sent to the app.
+            // Since our window is under the cursor, these events should be routed here.
+            self.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                // Only consider events if they occur on our specific floating window layer
+                if let window = event.window, window.level.rawValue == Int(CGWindowLevelForKey(.mainMenuWindow)) + 2 {
+                    
+                    print("[GestureDebug] Scroll Event Detected. DeltaY: \(event.scrollingDeltaY)")
+                    
+                    // FIXED CHECK: Negative DeltaY means upward swipe/scroll in logs provided
+                    if event.scrollingDeltaY < -2.0 {
+                        print("[GestureDebug] Dismissing due to swipe up (Manual Dismiss)")
+                        dismissSequence(shouldCloseNative: true)
+                        return nil // Consume the event
+                    }
+                }
+                return event
+            }
+        }
+        .onDisappear {
+            if let monitor = self.eventMonitor {
+                NSEvent.removeMonitor(monitor)
+                self.eventMonitor = nil
+            }
         }
     }
     
@@ -301,14 +318,26 @@ struct DynamicIslandContainer: View {
                 isExpanded = true
             }
         }
+        // Auto-dismiss after 5 seconds (Do NOT close native notification)
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
-            dismissSequence()
+            dismissSequence(shouldCloseNative: false)
         }
     }
     
-    private func dismissSequence() {
+    // UPDATED: Logic to handle Native Dismissal
+    private func dismissSequence(shouldCloseNative: Bool) {
+        print("[Island] Dismiss Sequence. Close Native: \(shouldCloseNative)")
+        
         withAnimation(springAnim) {
             isExpanded = false
+        }
+        
+        // Trigger Native Dismissal Logic (Async)
+        if shouldCloseNative {
+            // Delay slightly to match the UI collapse start
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                notification.dismissAction?()
+            }
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -326,17 +355,15 @@ struct DynamicIslandContainer: View {
         print("[Island] Opening app: \(notification.appName)")
         let workspace = NSWorkspace.shared
         
-        // 1. Try to launch via Path if available
         if let path = workspace.fullPath(forApplication: notification.appName) {
             let url = URL(fileURLWithPath: path)
             workspace.open(url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
-        }
-        // 2. Fallback to legacy launch if path not found
-        else {
+        } else {
             workspace.launchApplication(notification.appName)
         }
         
-        dismissSequence()
+        // Tapping opens the app, so we should clear the notification from the center.
+        dismissSequence(shouldCloseNative: true)
     }
 }
 

@@ -11,7 +11,14 @@ struct CapturedNotification: Identifiable, Equatable {
     let appName: String
     let icon: NSImage?
     let profileImage: NSImage?
+    // Closure to dismiss the native notification (e.g. click "Close" button)
+    let dismissAction: (() -> Void)?
     let timestamp = Date()
+    
+    // Equatable conformance requires ignoring the closure
+    static func == (lhs: CapturedNotification, rhs: CapturedNotification) -> Bool {
+        return lhs.id == rhs.id
+    }
 }
 
 func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notification: CFString, _ refcon: UnsafeMutableRawPointer?) {
@@ -108,12 +115,16 @@ class NotificationMonitor: ObservableObject {
                     profileImg = await captureSnapshot(of: profileElement)
                 }
                 
+                // IMPORTANT: We do NOT execute dismissAction here anymore.
+                // We pass it to the UI to handle manually.
+                
                 let finalNotification = CapturedNotification(
                     title: content.title,
                     body: content.body,
                     appName: content.appName,
                     icon: icon,
-                    profileImage: profileImg
+                    profileImage: profileImg,
+                    dismissAction: content.dismissAction
                 )
                 
                 DispatchQueue.main.async {
@@ -200,9 +211,7 @@ class NotificationMonitor: ObservableObject {
         }
     }
 
-    private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String, profileElement: AXUIElement?) {
-        // FILTER REMOVED: The height check (> 600) was blocking valid banner notifications
-        // because the root window for banners can also report full screen height (e.g. 982.0).
+    private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String, profileElement: AXUIElement?, dismissAction: (() -> Void)?) {
         
         var titles: [String] = []
         var detectedAppName: String = "System"
@@ -243,7 +252,6 @@ class NotificationMonitor: ObservableObject {
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
                         // HEURISTIC: Detect Notification Center History Panel
-                        // The History panel displays specific headers/footers not found in banners.
                         if text == "Notification Center" ||
                            text == "No Notifications" ||
                            text == "Do Not Disturb" ||
@@ -262,15 +270,11 @@ class NotificationMonitor: ObservableObject {
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
                     let descStr = (desc as? String) ?? ""
                     
-                    // Logic: If the image description matches the App Name, it's likely the App Icon.
-                    // If it does NOT match, it is a strong candidate for a profile photo.
                     if !descStr.isEmpty && detectedAppName != "System" && descStr.localizedCaseInsensitiveContains(detectedAppName) {
                         // Likely App Icon
                     } else {
-                        // Candidate for Profile Photo
                         if candidateProfileElement == nil { candidateProfileElement = child }
                     }
-                    
                     if !descStr.isEmpty { if detectedAppName == "System" { detectedAppName = descStr } }
                 }
                 
@@ -327,27 +331,17 @@ class NotificationMonitor: ObservableObject {
         
         // If identified as history panel, abort immediately
         if isHistoryPanel {
-            return ("", "", "", nil)
+            return ("", "", "", nil, nil)
         }
 
-        // HEURISTIC: If the first title found is "Notification Center", it's the header, not a notification title.
         let t = titles.first ?? "New Notification"
         if t == "Notification Center" {
-            return ("", "", "", nil)
+            return ("", "", "", nil, nil)
         }
         
-        // HEURISTIC: If we found content but NO way to dismiss it, it's likely a persistent window (like the History panel)
-        // rather than a transient banner. We should only capture dismissible alerts.
-        if pendingDismissal == nil {
-            return ("", "", "", nil)
-        }
-        
-        // Execute dismissal
-        if let dismissal = pendingDismissal {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { dismissal() }
-        }
-        
+        // IMPORTANT: We return the dismissal block, but we DO NOT execute it here.
+        // It is up to the UI to execute it based on user interaction (swipe vs timeout).
         let b = titles.count > 1 ? titles[1] : ""
-        return (t, b, detectedAppName, candidateProfileElement)
+        return (t, b, detectedAppName, candidateProfileElement, pendingDismissal)
     }
 }
