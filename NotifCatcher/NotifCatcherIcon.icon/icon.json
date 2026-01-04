@@ -3,7 +3,127 @@
     "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
   },
   "groups" : [
-
+    {
+      "layers" : [
+        {
+          "hidden" : true,
+          "image-name" : "BlackHand 2.png",
+          "name" : "BlackHand 2",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              -228.6171875,
+              203.4453125
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "automatic-gradient" : "extended-gray:0.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "automatic-gradient" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "hidden" : false,
+          "image-name" : "BlackHand.png",
+          "name" : "BlackHand",
+          "position" : {
+            "scale" : 1.2,
+            "translation-in-points" : [
+              173.09343424053296,
+              137.25317465389136
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "automatic-gradient" : "extended-gray:1.00000,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "BG2.png",
+          "name" : "BG2",
+          "position" : {
+            "scale" : 0.41,
+            "translation-in-points" : [
+              148.0473384215305,
+              -180.06492197347148
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "automatic-gradient" : "extended-gray:1.00000,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "Picture1 2.png",
+          "name" : "Picture1",
+          "position" : {
+            "scale" : 0.28,
+            "translation-in-points" : [
+              -61.266566274207435,
+              80.5090158266731
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "automatic-gradient" : "extended-gray:1.00000,1.00000"
+          },
+          "hidden" : true,
+          "image-name" : "BG1.png",
+          "name" : "BG1",
+          "position" : {
+            "scale" : 0.52,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "automatic-gradient" : "extended-gray:1.00000,1.00000"
+          },
+          "hidden" : true,
+          "image-name" : "Picture1 2.png",
+          "name" : "Picture1",
+          "position" : {
+            "scale" : 0.32,
+            "translation-in-points" : [
+              52.828125,
+              83.578125
+            ]
+          }
+        },
+        {
+          "hidden" : true,
+          "image-name" : "08b8c24089eb61a16402a3574b9f5d1406525a3067744fa96b046bfe14a72b88.png",
+          "name" : "08b8c24089eb61a16402a3574b9f5d1406525a3067744fa96b046bfe14a72b88",
+          "position" : {
+            "scale" : 0.6,
+            "translation-in-points" : [
+              -30.69700388259282,
+              -21.472366486410877
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
   ],
   "supported-platforms" : {
     "circles" : [
