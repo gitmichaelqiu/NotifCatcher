@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		463B9C752F095B9F0093B720 /* DynamicNotif.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DynamicNotif.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		463B9C752F095B9F0093B720 /* NotifCatcher.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NotifCatcher.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -40,7 +40,7 @@
 		463B9C762F095B9F0093B720 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				463B9C752F095B9F0093B720 /* DynamicNotif.app */,
+				463B9C752F095B9F0093B720 /* NotifCatcher.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,9 +48,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		463B9C742F095B9F0093B720 /* DynamicNotif */ = {
+		463B9C742F095B9F0093B720 /* NotifCatcher */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 463B9C802F095BA00093B720 /* Build configuration list for PBXNativeTarget "DynamicNotif" */;
+			buildConfigurationList = 463B9C802F095BA00093B720 /* Build configuration list for PBXNativeTarget "NotifCatcher" */;
 			buildPhases = (
 				463B9C712F095B9F0093B720 /* Sources */,
 				463B9C722F095B9F0093B720 /* Frameworks */,
@@ -63,11 +63,11 @@
 			fileSystemSynchronizedGroups = (
 				463B9C772F095B9F0093B720 /* DynamicNotif */,
 			);
-			name = DynamicNotif;
+			name = NotifCatcher;
 			packageProductDependencies = (
 			);
 			productName = DynamicNotif;
-			productReference = 463B9C752F095B9F0093B720 /* DynamicNotif.app */;
+			productReference = 463B9C752F095B9F0093B720 /* NotifCatcher.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -85,7 +85,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 463B9C702F095B9F0093B720 /* Build configuration list for PBXProject "DynamicNotif" */;
+			buildConfigurationList = 463B9C702F095B9F0093B720 /* Build configuration list for PBXProject "NotifCatcher" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -99,7 +99,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				463B9C742F095B9F0093B720 /* DynamicNotif */,
+				463B9C742F095B9F0093B720 /* NotifCatcher */,
 			);
 		};
 /* End PBXProject section */
@@ -265,13 +265,14 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = NotifCatcher;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = michaelqiu.DynamicNotif;
+				PRODUCT_BUNDLE_IDENTIFIER = com.michaelqiu.notifcatcher;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
@@ -309,13 +310,14 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = NotifCatcher;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = michaelqiu.DynamicNotif;
+				PRODUCT_BUNDLE_IDENTIFIER = com.michaelqiu.notifcatcher;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
@@ -336,7 +338,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		463B9C702F095B9F0093B720 /* Build configuration list for PBXProject "DynamicNotif" */ = {
+		463B9C702F095B9F0093B720 /* Build configuration list for PBXProject "NotifCatcher" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				463B9C7E2F095BA00093B720 /* Debug */,
@@ -345,7 +347,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		463B9C802F095BA00093B720 /* Build configuration list for PBXNativeTarget "DynamicNotif" */ = {
+		463B9C802F095BA00093B720 /* Build configuration list for PBXNativeTarget "NotifCatcher" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				463B9C812F095BA00093B720 /* Debug */,
