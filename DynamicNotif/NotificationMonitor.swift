@@ -11,11 +11,9 @@ struct CapturedNotification: Identifiable, Equatable {
     let appName: String
     let icon: NSImage?
     let profileImage: NSImage?
-    // Closure to dismiss the native notification (e.g. click "Close" button)
     let dismissAction: (() -> Void)?
     let timestamp = Date()
     
-    // Equatable conformance requires ignoring the closure
     static func == (lhs: CapturedNotification, rhs: CapturedNotification) -> Bool {
         return lhs.id == rhs.id
     }
@@ -25,19 +23,28 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     guard let refcon = refcon else { return }
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
+    let notifName = notification as String
+    print("[Monitor] ⚡️ AXObserver Callback Fired: \(notifName)")
+    
     DispatchQueue.global(qos: .userInteractive).async {
-        usleep(150000)
+        // Reduced delay to catch rapid updates, but kept slight pause for rendering
+        usleep(50000) // 50ms
         monitor.handleNewNotification(element: element)
     }
 }
 
 class NotificationMonitor: ObservableObject {
-    @Published var latestNotification: CapturedNotification?
+    public let notificationSubject = PassthroughSubject<CapturedNotification, Never>()
+    
     @Published var permissionGranted: Bool = false
     @Published var isListening: Bool = false
     @Published var errorMessage: String? = nil
     
     private var observer: AXObserver?
+    
+    // De-duplication state
+    private var lastCapturedSignature: String = ""
+    private var lastCapturedTime: Date = Date.distantPast
     
     init() {
         self.permissionGranted = checkPermissions()
@@ -73,7 +80,13 @@ class NotificationMonitor: ObservableObject {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(axObserver), .defaultMode)
         
         let appElement = AXUIElementCreateApplication(pid)
+        
+        // Listen for Window Creation (Standard banners)
         AXObserverAddNotification(axObserver, appElement, kAXWindowCreatedNotification as CFString, selfPointer)
+        
+        // Listen for Element Creation (Rapid banners that might reuse windows or append to list)
+        // Fixed: Use kAXCreatedNotification instead of the incorrect kAXUIElementCreatedNotification
+        AXObserverAddNotification(axObserver, appElement, kAXCreatedNotification as CFString, selfPointer)
         
         DispatchQueue.main.async { self.isListening = true }
     }
@@ -102,15 +115,55 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
+        // Climb up to find the root window or container.
+        // If 'element' is just a text field that triggered 'Created', we need its parent window to find the other text/buttons.
+        let rootElement = getTopLevelParent(element)
+        performScan(element: rootElement, retryCount: 0)
+    }
+    
+    private func getTopLevelParent(_ element: AXUIElement) -> AXUIElement {
+        var current = element
+        // Climb up max 5 levels to find a Window or top-level Group
+        for _ in 0..<5 {
+            var role: AnyObject?
+            AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role)
+            if let r = role as? String, r == "AXWindow" {
+                return current
+            }
+            
+            var parent: AnyObject?
+            let result = AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent)
+            if result != .success || parent == nil {
+                break
+            }
+            // Use force cast carefully, knowing AX APIs return CFTypes compatible with AXUIElement
+            current = parent as! AXUIElement
+        }
+        return current
+    }
+    
+    private func performScan(element: AXUIElement, retryCount: Int) {
         let content = scanAndDismiss(element)
         
+        // Success case: We found text
         if !content.title.isEmpty || !content.body.isEmpty {
+            
+            // DE-DUPLICATION CHECK
+            let signature = "\(content.appName)|\(content.title)|\(content.body)"
+            let now = Date()
+            if signature == lastCapturedSignature && now.timeIntervalSince(lastCapturedTime) < 2.0 {
+                print("[Monitor] ♻️ Duplicate detected within 2s. Ignoring.")
+                return
+            }
+            
+            // Update cache
+            lastCapturedSignature = signature
+            lastCapturedTime = now
+            
             let icon = resolveAppIcon(appName: content.appName)
             
             Task {
                 var profileImg: NSImage? = nil
-                
-                // Attempt to capture profile element if one was identified
                 if let profileElement = content.profileElement {
                     profileImg = await captureSnapshot(of: profileElement)
                 }
@@ -124,9 +177,15 @@ class NotificationMonitor: ObservableObject {
                     dismissAction: content.dismissAction
                 )
                 
-                DispatchQueue.main.async {
-                    print("🔔 Captured: \(finalNotification.title) from \(finalNotification.appName)")
-                    self.latestNotification = finalNotification
+                print("[Monitor] 📤 Sending: \(finalNotification.title)")
+                notificationSubject.send(finalNotification)
+            }
+        }
+        else {
+            if retryCount < 3 {
+                // Short retry delay
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                    self.performScan(element: element, retryCount: retryCount + 1)
                 }
             }
         }
@@ -203,19 +262,16 @@ class NotificationMonitor: ObservableObject {
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
             return NSImage(cgImage: cgImage, size: rect.size)
         } catch {
-            print("Snapshot Capture Error: \(error)")
+            // print("Snapshot Capture Error: \(error)")
             return nil
         }
     }
 
     private func scanAndDismiss(_ root: AXUIElement) -> (title: String, body: String, appName: String, profileElement: AXUIElement?, dismissAction: (() -> Void)?) {
-        
         var titles: [String] = []
         var detectedAppName: String = "System"
         var candidateProfileElement: AXUIElement? = nil
         var pendingDismissal: (() -> Void)? = nil
-        
-        // Flag to detect if we are looking at the History Panel (Dashboard)
         var isHistoryPanel = false
 
         var windowTitle: AnyObject?
@@ -234,34 +290,25 @@ class NotificationMonitor: ObservableObject {
             guard res == .success, let list = children as? [AXUIElement] else { return }
 
             for child in list {
-                // 1. Role
                 var role: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
                 let roleStr = role as? String ?? "Unknown"
-                
-                // HEURISTIC: Structural Exclusion for History Panel
-                if roleStr == "AXTable" || roleStr == "AXOutline" || roleStr == "AXList" {
-                    isHistoryPanel = true
-                    return
-                }
                 
                 var subrole: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
                 let subroleStr = subrole as? String ?? ""
 
-                // 2. Text
-                if roleStr == "AXStaticText" {
+                // 2. Text (Expanded Roles)
+                if roleStr == "AXStaticText" || roleStr == "AXTextArea" || roleStr == "AXTextField" {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
-                        // HEURISTIC: Detect Notification Center History Panel Headers/Buttons
                         let t = text.lowercased()
                         if t == "notification center" ||
                            t == "no notifications" ||
                            t == "do not disturb" ||
                            t == "edit widgets" ||
-                           t == "widgets" ||
-                           t.contains("clear all") {
+                           t == "widgets" {
                             isHistoryPanel = true
                             return
                         }
@@ -280,7 +327,6 @@ class NotificationMonitor: ObservableObject {
                     } else {
                         if candidateProfileElement == nil { candidateProfileElement = child }
                     }
-                    
                     if !descStr.isEmpty { if detectedAppName == "System" { detectedAppName = descStr } }
                 }
                 
@@ -289,7 +335,6 @@ class NotificationMonitor: ObservableObject {
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
                     let descStr = (desc as? String) ?? ""
                     
-                    // HEURISTIC: "Clear" buttons are strong indicators of history view
                     if descStr == "Clear" || descStr == "Clear All" {
                         isHistoryPanel = true
                         return
@@ -351,11 +396,8 @@ class NotificationMonitor: ObservableObject {
             return ("", "", "", nil, nil)
         }
         
-        if pendingDismissal == nil {
-            return ("", "", "", nil, nil)
-        }
+        // Relaxed dismissal check: allow read-only
         
-        // AUTO-DISMISSAL REMOVED HERE
         let b = titles.count > 1 ? titles[1] : ""
         return (t, b, detectedAppName, candidateProfileElement, pendingDismissal)
     }

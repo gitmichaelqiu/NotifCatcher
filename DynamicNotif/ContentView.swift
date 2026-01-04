@@ -7,80 +7,119 @@ struct ContentView: View {
     @StateObject var monitor = NotificationMonitor()
     @StateObject var windowManager = FloatingNotificationManager()
     
+    // Debug Logging State
+    @State private var testLog: String = "Ready for testing..."
+    @State private var receivedCount: Int = 0
+    
     var body: some View {
-        VStack(spacing: 25) {
-            Spacer()
-            
-            // Status Icon
-            ZStack {
-                Circle()
-                    .fill(monitor.isListening ? Color.green.opacity(0.15) : Color.red.opacity(0.15))
-                    .frame(width: 100, height: 100)
+        VStack(spacing: 20) {
+            // --- Header Section ---
+            VStack(spacing: 15) {
+                ZStack {
+                    Circle()
+                        .fill(monitor.isListening ? Color.green.opacity(0.15) : Color.red.opacity(0.15))
+                        .frame(width: 80, height: 80)
+                    
+                    Image(systemName: monitor.isListening ? "waveform.circle.fill" : "lock.slash.fill")
+                        .font(.system(size: 36))
+                        .foregroundColor(monitor.isListening ? .green : .red)
+                        .symbolEffect(.bounce, value: monitor.isListening)
+                }
                 
-                Image(systemName: monitor.isListening ? "waveform.circle.fill" : "lock.slash.fill")
-                    .font(.system(size: 44))
-                    .foregroundColor(monitor.isListening ? .green : .red)
-                    .symbolEffect(.bounce, value: monitor.isListening)
-            }
-            .padding(.bottom, 10)
-            
-            Text("DynamicNotif Controller")
-                .font(.title2.bold())
-                .fontDesign(.rounded)
-            
-            if !monitor.permissionGranted {
-                VStack(spacing: 8) {
-                    Text("Permission Required")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Text("Please grant Accessibility access in System Settings to allow notification capturing.")
+                Text("DynamicNotif Controller")
+                    .font(.title3.bold())
+                    .fontDesign(.rounded)
+                
+                if !monitor.permissionGranted {
+                    Text("Accessibility Permission Required")
                         .font(.caption)
-                        .multilineTextAlignment(.center)
+                        .foregroundColor(.red)
+                } else if !monitor.isListening {
+                    Button("Start Daemon") { monitor.startMonitoring() }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Text("Monitoring Active")
+                        .font(.caption)
                         .foregroundColor(.secondary)
-                        .padding(.horizontal)
-                }
-                .padding()
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.red.opacity(0.05)))
-            } else {
-                VStack(spacing: 12) {
-                    Text(monitor.isListening ? "Daemon is Active" : "Ready to Start")
-                        .font(.headline)
-                        .foregroundColor(monitor.isListening ? .primary : .secondary)
-                    
-                    Button(action: {
-                        if !monitor.isListening {
-                            monitor.startMonitoring()
-                        }
-                    }) {
-                        Text(monitor.isListening ? "Running..." : "Start Dynamic Island")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: 200)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(monitor.isListening ? .green : .blue)
-                    .disabled(monitor.isListening)
-                    .controlSize(.large)
-                    
-                    if monitor.isListening {
-                        Text("Minimize this window. The Island will appear at the top RIGHT of your screen.")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
                 }
             }
-            Spacer()
+            .padding(.top, 20)
+            
+            Divider()
+            
+            // --- Test Module Section ---
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Debug & Test Module")
+                    .font(.headline)
+                
+                HStack {
+                    Button("Send Single") {
+                        triggerSystemNotification(id: receivedCount + 1, delay: 0)
+                    }
+                    
+                    Button("Burst (3x)") {
+                        // Send 3 notifications in quick succession to test race conditions
+                        triggerSystemNotification(id: receivedCount + 1, delay: 0.1)
+                        triggerSystemNotification(id: receivedCount + 2, delay: 1.5) // Overlaps with previous dismiss
+                        triggerSystemNotification(id: receivedCount + 3, delay: 4.0)
+                    }
+                    
+                    Button("Clear Log") {
+                        testLog = ""
+                        receivedCount = 0
+                    }
+                }
+                
+                // Live Log View
+                ScrollView {
+                    Text(testLog)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(height: 120)
+                .background(Color.black.opacity(0.8))
+                .foregroundColor(.green)
+                .cornerRadius(8)
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 20)
         }
-        .frame(minWidth: 400, minHeight: 350)
-        .onChange(of: monitor.latestNotification) { newValue in
-            guard let newNotif = newValue else { return }
-            print("[ContentView] Received: \(newNotif.title)")
+        .frame(minWidth: 400, minHeight: 450)
+        // CHANGED: Use onReceive for reliable stream handling
+        .onReceive(monitor.notificationSubject) { newNotif in
+            print("[ContentView] ✅ Received: \(newNotif.title)")
+            
+            // Update Test Log
+            let time = Date().formatted(.dateTime.hour().minute().second())
+            testLog = "[\(time)] RECV: \(newNotif.title)\n" + testLog
+            receivedCount += 1
+            
             windowManager.showNotification(newNotif)
         }
         .onAppear {
-            // Auto-start if permissions are already granted
             if monitor.permissionGranted && !monitor.isListening {
                 print("[ContentView] Auto-starting monitoring...")
                 monitor.startMonitoring()
+            }
+        }
+    }
+    
+    // Helper to trigger system notifications via osascript
+    private func triggerSystemNotification(id: Int, delay: TimeInterval) {
+        let title = "Test Msg #\(id)"
+        let body = "This is test notification number \(id) sent via command."
+        
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+            let script = "display notification \"\(body)\" with title \"\(title)\""
+            let process = Process()
+            process.launchPath = "/usr/bin/osascript"
+            process.arguments = ["-e", script]
+            try? process.run()
+            
+            DispatchQueue.main.async {
+                let time = Date().formatted(.dateTime.hour().minute().second())
+                self.testLog = "[\(time)] SENT: \(title)\n" + self.testLog
             }
         }
     }
@@ -121,7 +160,6 @@ class FloatingNotificationManager: ObservableObject {
     func showNotification(_ notification: CapturedNotification) {
         guard let panel = self.panel else { return }
         
-        // Update current ID. This invalidates any pending hide requests from previous notifications.
         self.currentNotificationId = notification.id
         
         if let screen = NSScreen.main {
@@ -134,7 +172,6 @@ class FloatingNotificationManager: ObservableObject {
             panel.setFrame(NSRect(x: xPos, y: yPos, width: windowWidth, height: windowHeight), display: true)
         }
         
-        // Pass the specific ID to the dismissal closure
         let rootView = DynamicIslandContainer(notification: notification) { [weak self] dismissedId in
             self?.hidePanel(for: dismissedId)
         }
@@ -145,19 +182,15 @@ class FloatingNotificationManager: ObservableObject {
         
         panel.contentView = hostingView
         
-        // Ensure panel is active
-        panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x, y: panel.frame.origin.y)) // Ensure position is valid
+        panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x, y: panel.frame.origin.y))
         panel.alphaValue = 1
         panel.ignoresMouseEvents = false
         panel.orderFrontRegardless()
     }
     
     private func hidePanel(for id: UUID) {
-        // RACE CONDITION FIX:
-        // Only hide if the notification requesting hide is still the current one.
-        // If a new notification came in, currentNotificationId will be different, so we ignore this request.
         guard id == self.currentNotificationId else {
-            print("[WindowManager] Ignoring hide request for old ID: \(id). Current: \(String(describing: currentNotificationId))")
+            print("[WindowManager] Ignoring hide request for old ID: \(id)")
             return
         }
         
@@ -174,7 +207,6 @@ class FloatingNotificationManager: ObservableObject {
 // MARK: - Dynamic Island View
 struct DynamicIslandContainer: View {
     let notification: CapturedNotification
-    // Updated callback to include ID
     var onDismiss: (UUID) -> Void
     
     @State private var isExpanded: Bool = false
@@ -283,6 +315,7 @@ struct DynamicIslandContainer: View {
             self.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
                 if let window = event.window, window.level.rawValue == Int(CGWindowLevelForKey(.mainMenuWindow)) + 2 {
                     if event.scrollingDeltaY < -2.0 {
+                        print("[GestureDebug] Dismissing due to swipe up (Manual Dismiss)")
                         dismissSequence(shouldCloseNative: false)
                         return nil
                     }
@@ -311,6 +344,8 @@ struct DynamicIslandContainer: View {
     }
     
     private func dismissSequence(shouldCloseNative: Bool) {
+        print("[Island] Dismiss Sequence. Close Native: \(shouldCloseNative)")
+        
         withAnimation(springAnim) {
             isExpanded = false
         }
