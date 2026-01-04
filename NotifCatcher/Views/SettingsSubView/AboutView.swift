@@ -17,14 +17,14 @@ struct AboutView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                // MARK: - App Header
                 VStack(spacing: 12) {
-                    Image(systemName: "bell.badge.fill") // Placeholder for App Icon
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 120, height: 120)
-                        .foregroundStyle(.linearGradient(colors: [.blue, .purple], startPoint: .top, endPoint: .bottom))
-                        .shadow(radius: 5)
+                    if let nsImage = NSApplication.shared.applicationIconImage {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 120, height: 120)
+                            .shadow(radius: 5)
+                    }
 
                     VStack(spacing: 4) {
                         Text(appName)
