@@ -240,10 +240,7 @@ class NotificationMonitor: ObservableObject {
                 let roleStr = role as? String ?? "Unknown"
                 
                 // HEURISTIC: Structural Exclusion for History Panel
-                // The history view typically contains Tables, Outlines, or Lists.
-                // Banners are usually simple Groups.
                 if roleStr == "AXTable" || roleStr == "AXOutline" || roleStr == "AXList" {
-                    print("[Filter] Detected History Panel structure (Role: \(roleStr)). Ignoring.")
                     isHistoryPanel = true
                     return
                 }
@@ -265,7 +262,6 @@ class NotificationMonitor: ObservableObject {
                            t == "edit widgets" ||
                            t == "widgets" ||
                            t.contains("clear all") {
-                            print("[Filter] Detected History Panel text: '\(text)'. Ignoring.")
                             isHistoryPanel = true
                             return
                         }
@@ -295,7 +291,6 @@ class NotificationMonitor: ObservableObject {
                     
                     // HEURISTIC: "Clear" buttons are strong indicators of history view
                     if descStr == "Clear" || descStr == "Clear All" {
-                        print("[Filter] Detected History Panel button: '\(descStr)'. Ignoring.")
                         isHistoryPanel = true
                         return
                     }
@@ -347,22 +342,20 @@ class NotificationMonitor: ObservableObject {
         
         crawl(root, depth: 0)
         
-        // If identified as history panel, abort immediately
         if isHistoryPanel {
             return ("", "", "", nil, nil)
         }
 
         let t = titles.first ?? "New Notification"
         if t == "Notification Center" {
-            print("[Filter] Title is 'Notification Center'. Ignoring.")
             return ("", "", "", nil, nil)
         }
         
         if pendingDismissal == nil {
-            print("[Filter] No dismissal action found (Persistent Window?). Ignoring.")
             return ("", "", "", nil, nil)
         }
         
+        // AUTO-DISMISSAL REMOVED HERE
         let b = titles.count > 1 ? titles[1] : ""
         return (t, b, detectedAppName, candidateProfileElement, pendingDismissal)
     }
