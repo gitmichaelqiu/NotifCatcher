@@ -11,9 +11,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		463B9C772F095B9F0093B720 /* DynamicNotif */ = {
+		463B9C772F095B9F0093B720 /* NotifCatcher */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = DynamicNotif;
+			path = NotifCatcher;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,7 +32,7 @@
 		463B9C6C2F095B9F0093B720 = {
 			isa = PBXGroup;
 			children = (
-				463B9C772F095B9F0093B720 /* DynamicNotif */,
+				463B9C772F095B9F0093B720 /* NotifCatcher */,
 				463B9C762F095B9F0093B720 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -61,7 +61,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				463B9C772F095B9F0093B720 /* DynamicNotif */,
+				463B9C772F095B9F0093B720 /* NotifCatcher */,
 			);
 			name = NotifCatcher;
 			packageProductDependencies = (
