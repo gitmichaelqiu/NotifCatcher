@@ -419,7 +419,7 @@ class NotificationMonitor: ObservableObject {
             return ("", "", "", nil, nil)
         }
 
-        let t = titles.first ?? "New Notification"
+        let t = titles.first ?? ""
         if t == "Notification Center" {
             return ("", "", "", nil, nil)
         }
