@@ -76,6 +76,13 @@ struct ContentView: View {
             print("[ContentView] Received: \(newNotif.title)")
             windowManager.showNotification(newNotif)
         }
+        .onAppear {
+            // Auto-start if permissions are already granted
+            if monitor.permissionGranted && !monitor.isListening {
+                print("[ContentView] Auto-starting monitoring...")
+                monitor.startMonitoring()
+            }
+        }
     }
 }
 
@@ -85,7 +92,6 @@ class FloatingNotificationManager: ObservableObject {
     private var currentNotificationId: UUID?
     
     // Config: Position logic for Top Right
-    // We use a wider window (450) to hold the 380px content + shadows (radius 15) without clipping.
     private let windowWidth: CGFloat = 450
     private let windowHeight: CGFloat = 200
     
@@ -102,7 +108,7 @@ class FloatingNotificationManager: ObservableObject {
         p.hasShadow = false
         p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        p.acceptsMouseMovedEvents = true // Important for hover/scroll detection
+        p.acceptsMouseMovedEvents = true
         
         // Start hidden completely
         p.orderOut(nil)
@@ -115,18 +121,11 @@ class FloatingNotificationManager: ObservableObject {
     func showNotification(_ notification: CapturedNotification) {
         guard let panel = self.panel else { return }
         
+        // Update current ID. This invalidates any pending hide requests from previous notifications.
         self.currentNotificationId = notification.id
         
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
-            
-            // VISUAL CALCULATION:
-            // Target: Visual content (380px) should be 21px from Right Edge.
-            // Window Width: 450px.
-            // Content is centered in Window -> Side Margins = (450 - 380) / 2 = 35px.
-            // Desired Visual Right Gap = 21.
-            // Window Right Gap = Desired Visual Gap - Side Margin = 21 - 35 = -14.
-            // User requested explicit padding of -35 (Overriding math)
             let rightPadding: CGFloat = -35
             
             let xPos = visibleFrame.maxX - windowWidth - rightPadding
@@ -135,8 +134,9 @@ class FloatingNotificationManager: ObservableObject {
             panel.setFrame(NSRect(x: xPos, y: yPos, width: windowWidth, height: windowHeight), display: true)
         }
         
-        let rootView = DynamicIslandContainer(notification: notification) { [weak self] in
-            self?.hidePanel()
+        // Pass the specific ID to the dismissal closure
+        let rootView = DynamicIslandContainer(notification: notification) { [weak self] dismissedId in
+            self?.hidePanel(for: dismissedId)
         }
         
         let hostingView = NSHostingView(rootView: rootView)
@@ -145,27 +145,28 @@ class FloatingNotificationManager: ObservableObject {
         
         panel.contentView = hostingView
         
-        // ACTIVATE: Make visible and clickable
+        // Ensure panel is active
+        panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x, y: panel.frame.origin.y)) // Ensure position is valid
         panel.alphaValue = 1
         panel.ignoresMouseEvents = false
         panel.orderFrontRegardless()
     }
     
-    private func hidePanel() {
-        print("[WindowManager] Hiding panel and disabling clicks")
+    private func hidePanel(for id: UUID) {
+        // RACE CONDITION FIX:
+        // Only hide if the notification requesting hide is still the current one.
+        // If a new notification came in, currentNotificationId will be different, so we ignore this request.
+        guard id == self.currentNotificationId else {
+            print("[WindowManager] Ignoring hide request for old ID: \(id). Current: \(String(describing: currentNotificationId))")
+            return
+        }
+        
+        print("[WindowManager] Hiding panel and disabling clicks for ID: \(id)")
         guard let panel = self.panel else { return }
         
-        // DEACTIVATE:
-        // 1. Force mouse events off FIRST
         panel.ignoresMouseEvents = true
-        
-        // 2. Hide visual properties
         panel.alphaValue = 0
-        
-        // 3. Move window off-screen to ensure it cannot block anything
         panel.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        
-        // 4. Remove from window list
         panel.orderOut(nil)
     }
 }
@@ -173,7 +174,8 @@ class FloatingNotificationManager: ObservableObject {
 // MARK: - Dynamic Island View
 struct DynamicIslandContainer: View {
     let notification: CapturedNotification
-    var onDismiss: () -> Void
+    // Updated callback to include ID
+    var onDismiss: (UUID) -> Void
     
     @State private var isExpanded: Bool = false
     @State private var isVisible: Bool = false
@@ -183,8 +185,6 @@ struct DynamicIslandContainer: View {
     
     private let startWidth: CGFloat = 20
     private let startHeight: CGFloat = 0
-    
-    // User Specification: Width 380
     private let expandedWidth: CGFloat = 380
     private let expandedHeight: CGFloat = 84
     
@@ -205,10 +205,8 @@ struct DynamicIslandContainer: View {
                 .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
                 
                 HStack(spacing: 12) {
-                    // LEFT: Icon (Profile Pic Priority -> App Icon -> Fallback)
                     ZStack {
                         if let profile = notification.profileImage {
-                             // Case 1: Profile Photo (Circle)
                             Image(nsImage: profile)
                                 .resizable()
                                 .aspectRatio(contentMode: .fill)
@@ -216,7 +214,6 @@ struct DynamicIslandContainer: View {
                                 .clipShape(Circle())
                                 .opacity(isExpanded ? 1 : 0)
                         } else if let appIcon = notification.icon {
-                            // Case 2: App Icon (Rounded Square)
                             Image(nsImage: appIcon)
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
@@ -224,7 +221,6 @@ struct DynamicIslandContainer: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 .opacity(isExpanded ? 1 : 0)
                         } else {
-                            // Case 3: Fallback
                             Circle()
                                 .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .top, endPoint: .bottom))
                                 .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
@@ -284,21 +280,11 @@ struct DynamicIslandContainer: View {
         .onAppear {
             runPresentationSequence()
             
-            // Monitor local scroll events
-            // This captures scroll/swipe events sent to the app.
-            // Since our window is under the cursor, these events should be routed here.
             self.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                // Only consider events if they occur on our specific floating window layer
                 if let window = event.window, window.level.rawValue == Int(CGWindowLevelForKey(.mainMenuWindow)) + 2 {
-                    
-                    print("[GestureDebug] Scroll Event Detected. DeltaY: \(event.scrollingDeltaY)")
-                    
-                    // FIXED CHECK: Negative DeltaY means upward swipe/scroll in logs provided
                     if event.scrollingDeltaY < -2.0 {
-                        print("[GestureDebug] Dismissing due to swipe up (Manual Dismiss)")
-                        // SWIPE UP: Dismiss Island, but DO NOT close native notification
                         dismissSequence(shouldCloseNative: false)
-                        return nil // Consume the event
+                        return nil
                     }
                 }
                 return event
@@ -319,23 +305,17 @@ struct DynamicIslandContainer: View {
                 isExpanded = true
             }
         }
-        // Auto-dismiss after 5 seconds (Do NOT close native notification)
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
             dismissSequence(shouldCloseNative: false)
         }
     }
     
-    // UPDATED: Logic to handle Native Dismissal
     private func dismissSequence(shouldCloseNative: Bool) {
-        print("[Island] Dismiss Sequence. Close Native: \(shouldCloseNative)")
-        
         withAnimation(springAnim) {
             isExpanded = false
         }
         
-        // Trigger Native Dismissal Logic (Async)
         if shouldCloseNative {
-            // Delay slightly to match the UI collapse start
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
                 notification.dismissAction?()
             }
@@ -347,7 +327,7 @@ struct DynamicIslandContainer: View {
             }
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                onDismiss()
+                onDismiss(notification.id)
             }
         }
     }
@@ -363,7 +343,6 @@ struct DynamicIslandContainer: View {
             workspace.launchApplication(notification.appName)
         }
         
-        // Tapping opens the app, so we should clear the notification from the center.
         dismissSequence(shouldCloseNative: true)
     }
 }
