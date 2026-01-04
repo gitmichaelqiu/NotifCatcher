@@ -11,7 +11,7 @@ struct CapturedNotification: Identifiable, Equatable {
     let appName: String
     let icon: NSImage?
     let profileImage: NSImage?
-    let otpCode: String? // NEW: Detected 2FA Code
+    let otpCode: String?
     let dismissAction: (() -> Void)?
     let timestamp = Date()
     
@@ -43,8 +43,8 @@ class NotificationMonitor: ObservableObject {
     private var observer: AXObserver?
     
     // De-duplication state
-    private var lastCapturedSignature: String = ""
-    private var lastCapturedTime: Date = Date.distantPast
+    private var capturedSignatures: [String: Date] = [:]
+    private let dedupeLock = NSLock() // Lock to prevent race conditions
     
     init() {
         self.permissionGranted = checkPermissions()
@@ -133,6 +133,7 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
+        // Climb up to find the root window or container.
         let rootElement = getTopLevelParent(element)
         performScan(element: rootElement, retryCount: 0)
     }
@@ -158,18 +159,28 @@ class NotificationMonitor: ObservableObject {
         
         if !content.title.isEmpty || !content.body.isEmpty {
             
-            let signature = "\(content.appName)|\(content.title)|\(content.body)"
+            // SIMPLIFIED SIGNATURE: Exclude AppName to avoid duplicates when AppName detection flaps (e.g. "Script Editor" vs "System")
+            let signature = "\(content.title)|\(content.body)"
             let now = Date()
             
-            if signature == lastCapturedSignature && now.timeIntervalSince(lastCapturedTime) < 2.0 {
+            // THREAD-SAFE DEDUPLICATION
+            dedupeLock.lock()
+            
+            // 1. Cleanup: Remove signatures older than 10 seconds to keep memory check fast
+            capturedSignatures = capturedSignatures.filter { now.timeIntervalSince($0.value) < 10.0 }
+            
+            // 2. Check: If we saw this exact content less than 5 seconds ago, ignore it.
+            if let lastTime = capturedSignatures[signature], now.timeIntervalSince(lastTime) < 5.0 {
+                print("[Monitor] ♻️ Duplicate content (Time delta: \(String(format: "%.2f", now.timeIntervalSince(lastTime)))s). Ignoring signature: \(signature.prefix(30))...")
+                dedupeLock.unlock()
                 return
             }
             
-            lastCapturedSignature = signature
-            lastCapturedTime = now
+            // 3. Update
+            capturedSignatures[signature] = now
+            dedupeLock.unlock()
             
             let icon = resolveAppIcon(appName: content.appName)
-            // Extract OTP
             let otp = extractOTP(from: content.body) ?? extractOTP(from: content.title)
             
             Task {
@@ -184,7 +195,7 @@ class NotificationMonitor: ObservableObject {
                     appName: content.appName,
                     icon: icon,
                     profileImage: profileImg,
-                    otpCode: otp, // Set extracted code
+                    otpCode: otp,
                     dismissAction: content.dismissAction
                 )
                 
@@ -201,13 +212,7 @@ class NotificationMonitor: ObservableObject {
         }
     }
     
-    // 2FA Extraction Logic
     private func extractOTP(from text: String) -> String? {
-        // Regex Look:
-        // 1. Standalone 4-8 digits: \b\d{4,8}\b (e.g., 123456)
-        // 2. Hyphenated 6 digits: \b\d{3}-\d{3}\b (e.g., 123-456)
-        // We use negative lookbehind/ahead to ensure they aren't part of larger numbers.
-        
         let pattern = "(?<!\\d)(\\d{4,8}|\\d{3}-\\d{3})(?!\\d)"
         
         do {
@@ -217,12 +222,7 @@ class NotificationMonitor: ObservableObject {
             
             for match in results {
                 let foundString = nsString.substring(with: match.range)
-                
-                // Heuristic filtering:
-                // Ignore likely years (e.g., 2020-2030) if they appear alone
-                if let num = Int(foundString), num >= 2000 && num <= 2030 {
-                    continue
-                }
+                if let num = Int(foundString), num >= 2000 && num <= 2030 { continue }
                 return foundString
             }
         } catch {
@@ -342,6 +342,7 @@ class NotificationMonitor: ObservableObject {
                 AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
                 let subroleStr = subrole as? String ?? ""
 
+                // 2. Text (Expanded Roles)
                 if roleStr == "AXStaticText" || roleStr == "AXTextArea" || roleStr == "AXTextField" {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
@@ -359,6 +360,7 @@ class NotificationMonitor: ObservableObject {
                     }
                 }
                 
+                // 3. App Name & Profile Photo Strategy
                 if roleStr == "AXImage" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
@@ -400,6 +402,7 @@ class NotificationMonitor: ObservableObject {
                     }
                 }
 
+                // 4. Dismissal
                 if pendingDismissal == nil {
                     var actionNames: CFArray?
                     AXUIElementCopyActionNames(child, &actionNames)
