@@ -3,7 +3,7 @@ import ServiceManagement
 import Combine
 import Cocoa
 
-// MARK: - Swizzling for Settings Window Sidebar
+// MARK: - Swizzling for Settings Window Sidebar (Exact match from DesktopRenamer)
 extension NSSplitViewItem {
     @nonobjc private static let swizzler: () = {
         let originalSelector = #selector(getter: canCollapse)
@@ -41,6 +41,7 @@ extension View {
 class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate!
     var monitor: NotificationMonitor!
+    var settingsManager: IslandSettingsManager!
     var windowManager: FloatingNotificationManager!
     var settingsWindowController: NSWindowController?
     
@@ -49,14 +50,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Initialize Core Services
         self.monitor = NotificationMonitor()
-        self.windowManager = FloatingNotificationManager(monitor: monitor)
+        self.settingsManager = IslandSettingsManager()
+        self.windowManager = FloatingNotificationManager(monitor: monitor, settings: settingsManager)
         
-        // Auto-start monitoring if permission exists
         if monitor.permissionGranted {
             monitor.startMonitoring()
         }
         
-        // Open Settings Window on Launch
         openSettingsWindow()
     }
     
@@ -73,8 +73,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
-        let width: CGFloat = 850
-        let height: CGFloat = 600
+        // Standard DesktopRenamer settings window size
+        let width: CGFloat = 750
+        let height: CGFloat = 550
         
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
@@ -89,16 +90,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarSeparatorStyle = .none
         window.toolbar = nil
         window.center()
-        window.minSize = NSSize(width: 700, height: 500)
+        window.minSize = NSSize(width: width, height: height)
+        window.collectionBehavior = [.participatesInCycle]
         window.isMovableByWindowBackground = true
         
-        let settingsView = SettingsView(monitor: monitor, windowManager: windowManager)
-        let hostingController = NSHostingController(rootView: settingsView)
-        window.contentViewController = hostingController
+        let settingsVC = SettingsHostingController(monitor: monitor, windowManager: windowManager, settings: settingsManager)
+        window.contentViewController = settingsVC
         
         let windowController = NSWindowController(window: window)
+        windowController.window?.delegate = self
         self.settingsWindowController = windowController
+        
         windowController.showWindow(nil)
+    }
+}
+
+extension AppDelegate: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        if notification.object as? NSWindow == settingsWindowController?.window {
+            settingsWindowController = nil
+        }
     }
 }
 
@@ -113,6 +124,10 @@ struct NotifCatcherApp: App {
     var body: some Scene {
         Settings {
             EmptyView()
+        }
+        .commands {
+            CommandGroup(replacing: .appInfo) { }
+            CommandGroup(replacing: .appSettings) { }
         }
     }
 }

@@ -6,13 +6,16 @@ import Combine
 class FloatingNotificationManager: ObservableObject {
     private var panel: NSPanel?
     private var currentNotificationId: UUID?
+    private var cancellables = Set<AnyCancellable>()
+    private var settings: IslandSettingsManager
     
-    // Optimal Dimensions found in testing
-    private let windowWidth: CGFloat = 450
+    // Optimal Dimensions
+    private let baseWindowWidth: CGFloat = 450
     private let windowHeight: CGFloat = 200
-    private let rightPadding: CGFloat = -35
     
-    init(monitor: NotificationMonitor) {
+    init(monitor: NotificationMonitor, settings: IslandSettingsManager) {
+        self.settings = settings
+        
         let p = NSPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -32,7 +35,6 @@ class FloatingNotificationManager: ObservableObject {
         
         self.panel = p
         
-        // Subscribe to Monitor
         monitor.notificationSubject
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notif in
@@ -41,8 +43,6 @@ class FloatingNotificationManager: ObservableObject {
             .store(in: &cancellables)
     }
     
-    private var cancellables = Set<AnyCancellable>()
-    
     func showNotification(_ notification: CapturedNotification) {
         guard let panel = self.panel else { return }
         
@@ -50,13 +50,20 @@ class FloatingNotificationManager: ObservableObject {
         
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
-            let xPos = visibleFrame.maxX - windowWidth - rightPadding
+            
+            // RESTORED ORIGINAL LOGIC:
+            // Direct offset calculation without complex content-width math.
+            // This relies on the user adjusting 'rightPadding' to visually align the window
+            // containing the centered island content.
+            let padding = CGFloat(settings.rightPadding)
+            
+            let xPos = visibleFrame.maxX - baseWindowWidth - padding
             let yPos = visibleFrame.maxY - windowHeight
             
-            panel.setFrame(NSRect(x: xPos, y: yPos, width: windowWidth, height: windowHeight), display: true)
+            panel.setFrame(NSRect(x: xPos, y: yPos, width: baseWindowWidth, height: windowHeight), display: true)
         }
         
-        let rootView = DynamicIslandContainer(notification: notification) { [weak self] dismissedId in
+        let rootView = DynamicIslandContainer(notification: notification, settings: settings) { [weak self] dismissedId in
             self?.hidePanel(for: dismissedId)
         }
         
@@ -85,31 +92,51 @@ class FloatingNotificationManager: ObservableObject {
 // MARK: - Visual Island Component
 struct DynamicIslandContainer: View {
     let notification: CapturedNotification
+    @ObservedObject var settings: IslandSettingsManager
     var onDismiss: (UUID) -> Void
     
     @State private var isExpanded: Bool = false
+    @State private var isStashed: Bool = false
     @State private var isVisible: Bool = false
     @State private var isCopied: Bool = false
     @State private var eventMonitor: Any? = nil
+    @State private var autoDismissTask: DispatchWorkItem?
     
     private let springAnim = Animation.interpolatingSpring(mass: 0.5, stiffness: 200, damping: 18, initialVelocity: 0.5)
     
     private let startWidth: CGFloat = 20
-    private let startHeight: CGFloat = 0
-    private let expandedWidth: CGFloat = 380
     private let expandedHeight: CGFloat = 84
+    private let stashedSize: CGFloat = 46
+    
+    var currentWidth: CGFloat {
+        if isStashed { return stashedSize }
+        if isExpanded { return CGFloat(settings.width) }
+        return startWidth
+    }
+    
+    var currentHeight: CGFloat {
+        if isStashed { return stashedSize }
+        if isExpanded { return expandedHeight }
+        return 0
+    }
     
     var body: some View {
         VStack {
             ZStack(alignment: .top) {
                 // Background & Border
                 Group {
-                    LiquidMenubarShape(bottomRadius: isExpanded ? 32 : 4, flareRadius: isExpanded ? 15 : 2)
-                        .fill(.black)
-                        .shadow(color: .black.opacity(0.4), radius: 15, x: 0, y: 8)
+                    LiquidMenubarShape(
+                        bottomRadius: isStashed ? 23 : (isExpanded ? 32 : 4),
+                        flareRadius: isStashed ? 8 : (isExpanded ? 15 : 2)
+                    )
+                    .fill(.black)
+                    .shadow(color: .black.opacity(0.4), radius: 15, x: 0, y: 8)
                     
-                    LiquidMenubarShape(bottomRadius: isExpanded ? 32 : 4, flareRadius: isExpanded ? 15 : 2)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                    LiquidMenubarShape(
+                        bottomRadius: isStashed ? 23 : (isExpanded ? 32 : 4),
+                        flareRadius: isStashed ? 8 : (isExpanded ? 15 : 2)
+                    )
+                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
                 }
                 
                 // Content
@@ -118,19 +145,21 @@ struct DynamicIslandContainer: View {
                     ZStack {
                         if let profile = notification.profileImage {
                             Image(nsImage: profile).resizable().aspectRatio(contentMode: .fill)
-                                .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
+                                .frame(width: (isExpanded || isStashed) ? 38 : 0, height: (isExpanded || isStashed) ? 38 : 0)
                                 .clipShape(Circle())
                         } else if let appIcon = notification.icon {
                             Image(nsImage: appIcon).resizable().aspectRatio(contentMode: .fit)
-                                .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
+                                .frame(width: (isExpanded || isStashed) ? 38 : 0, height: (isExpanded || isStashed) ? 38 : 0)
                                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         } else {
-                            Circle().fill(.gray).frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
+                            Circle().fill(.gray)
+                                .frame(width: (isExpanded || isStashed) ? 38 : 0, height: (isExpanded || isStashed) ? 38 : 0)
                         }
                     }
-                    .opacity(isExpanded ? 1 : 0)
+                    .opacity((isExpanded || isStashed) ? 1 : 0)
+                    .scaleEffect(isStashed ? 0.8 : 1.0)
                     
-                    if isExpanded {
+                    if isExpanded && !isStashed {
                         HStack(alignment: .center) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(notification.title)
@@ -170,19 +199,19 @@ struct DynamicIslandContainer: View {
                                 }
                             }
                         }
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
                     }
                 }
-                .padding(.horizontal, 30)
-                .padding(.top, 14)
-                .frame(height: isExpanded ? expandedHeight : startHeight, alignment: .top)
+                .padding(.horizontal, isStashed ? 4 : 30)
+                .padding(.top, isStashed ? 4 : 14)
+                .frame(height: currentHeight, alignment: .top)
             }
-            .frame(width: isExpanded ? expandedWidth : startWidth,
-                   height: isExpanded ? expandedHeight : startHeight)
+            .frame(width: currentWidth, height: currentHeight)
             .opacity(isVisible ? 1 : 0)
             .onTapGesture {
-                openApp()
+                if isStashed { expandFromStash() } else { openApp() }
             }
+            .onHover { if isStashed && $0 { expandFromStash() } }
             .padding(.top, 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -194,16 +223,15 @@ struct DynamicIslandContainer: View {
         }
         .onDisappear {
             if let m = eventMonitor { NSEvent.removeMonitor(m); eventMonitor = nil }
+            autoDismissTask?.cancel()
         }
     }
     
     private func setupScrollMonitor() {
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
             if let window = event.window, window.level.rawValue == Int(CGWindowLevelForKey(.mainMenuWindow)) + 2 {
-                if event.scrollingDeltaY < -2.0 {
-                    dismissSequence(shouldCloseNative: false)
-                    return nil
-                }
+                if event.scrollingDeltaY < -2.0 && !isStashed { dismissSequence(shouldCloseNative: false); return nil }
+                if event.scrollingDeltaX > 2.0 && !isStashed { withAnimation(springAnim) { stashNotification() }; return nil }
             }
             return event
         }
@@ -212,16 +240,28 @@ struct DynamicIslandContainer: View {
     private func runPresentationSequence() {
         isVisible = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { withAnimation(springAnim) { isExpanded = true } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { dismissSequence(shouldCloseNative: false) }
+        let task = DispatchWorkItem { if !self.isStashed { self.dismissSequence(shouldCloseNative: false) } }
+        self.autoDismissTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + settings.displayDuration, execute: task)
+    }
+    
+    private func stashNotification() {
+        autoDismissTask?.cancel()
+        isStashed = true
+        isExpanded = false
+    }
+    
+    private func expandFromStash() {
+        isStashed = false
+        isExpanded = true
+        let task = DispatchWorkItem { if !self.isStashed { self.dismissSequence(shouldCloseNative: false) } }
+        self.autoDismissTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + settings.displayDuration, execute: task)
     }
     
     private func dismissSequence(shouldCloseNative: Bool) {
-        withAnimation(springAnim) { isExpanded = false }
-        
-        if shouldCloseNative {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { notification.dismissAction?() }
-        }
-        
+        withAnimation(springAnim) { isExpanded = false; isStashed = false }
+        if shouldCloseNative { DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { notification.dismissAction?() } }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             withAnimation(.easeIn(duration: 0.2)) { isVisible = false }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { onDismiss(notification.id) }
@@ -253,16 +293,13 @@ struct DynamicIslandContainer: View {
 struct LiquidMenubarShape: Shape {
     var bottomRadius: CGFloat
     var flareRadius: CGFloat
-    
     var animatableData: AnimatablePair<CGFloat, CGFloat> {
         get { AnimatablePair(bottomRadius, flareRadius) }
         set { bottomRadius = newValue.first; flareRadius = newValue.second }
     }
-    
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let w = rect.width
-        let safeFlare = min(flareRadius, w / 2)
+        let safeFlare = min(flareRadius, rect.width / 2)
         let inset = safeFlare
         let bodyMinX = rect.minX + inset
         let bodyMaxX = rect.maxX - inset
