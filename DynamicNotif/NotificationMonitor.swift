@@ -11,6 +11,7 @@ struct CapturedNotification: Identifiable, Equatable {
     let appName: String
     let icon: NSImage?
     let profileImage: NSImage?
+    let otpCode: String? // NEW: Detected 2FA Code
     let dismissAction: (() -> Void)?
     let timestamp = Date()
     
@@ -132,9 +133,6 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
-        // If the event came from the App element itself (common for LayoutChanged),
-        // we might need to scan the whole app or look for windows.
-        // For now, we try to get the parent window.
         let rootElement = getTopLevelParent(element)
         performScan(element: rootElement, retryCount: 0)
     }
@@ -144,20 +142,12 @@ class NotificationMonitor: ObservableObject {
         for _ in 0..<5 {
             var role: AnyObject?
             AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role)
-            // If we hit the Window, that's what we want.
-            if let r = role as? String, r == "AXWindow" {
-                return current
-            }
-            // If we hit the Application, stop climbing (we can scan the app directly)
-            if let r = role as? String, r == "AXApplication" {
-                return current
-            }
+            if let r = role as? String, r == "AXWindow" { return current }
+            if let r = role as? String, r == "AXApplication" { return current }
             
             var parent: AnyObject?
             let result = AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent)
-            if result != .success || parent == nil {
-                break
-            }
+            if result != .success || parent == nil { break }
             current = parent as! AXUIElement
         }
         return current
@@ -166,26 +156,21 @@ class NotificationMonitor: ObservableObject {
     private func performScan(element: AXUIElement, retryCount: Int) {
         let content = scanAndDismiss(element)
         
-        // Success case
         if !content.title.isEmpty || !content.body.isEmpty {
             
-            // DE-DUPLICATION
-            // We use content signature to avoid processing the same message multiple times
-            // (e.g. Created + LayoutChanged + ValueChanged all firing for one msg)
             let signature = "\(content.appName)|\(content.title)|\(content.body)"
             let now = Date()
             
-            // If same content captured < 2.0s ago, ignore.
             if signature == lastCapturedSignature && now.timeIntervalSince(lastCapturedTime) < 2.0 {
-                // print("[Monitor] ♻️ Duplicate content detected. Ignoring.")
                 return
             }
             
-            // Update cache
             lastCapturedSignature = signature
             lastCapturedTime = now
             
             let icon = resolveAppIcon(appName: content.appName)
+            // Extract OTP
+            let otp = extractOTP(from: content.body) ?? extractOTP(from: content.title)
             
             Task {
                 var profileImg: NSImage? = nil
@@ -199,10 +184,11 @@ class NotificationMonitor: ObservableObject {
                     appName: content.appName,
                     icon: icon,
                     profileImage: profileImg,
+                    otpCode: otp, // Set extracted code
                     dismissAction: content.dismissAction
                 )
                 
-                print("[Monitor] 📤 Captured & Sending: \(finalNotification.title)")
+                print("[Monitor] 📤 Captured & Sending: \(finalNotification.title) (OTP: \(otp ?? "None"))")
                 notificationSubject.send(finalNotification)
             }
         }
@@ -213,6 +199,36 @@ class NotificationMonitor: ObservableObject {
                 }
             }
         }
+    }
+    
+    // 2FA Extraction Logic
+    private func extractOTP(from text: String) -> String? {
+        // Regex Look:
+        // 1. Standalone 4-8 digits: \b\d{4,8}\b (e.g., 123456)
+        // 2. Hyphenated 6 digits: \b\d{3}-\d{3}\b (e.g., 123-456)
+        // We use negative lookbehind/ahead to ensure they aren't part of larger numbers.
+        
+        let pattern = "(?<!\\d)(\\d{4,8}|\\d{3}-\\d{3})(?!\\d)"
+        
+        do {
+            let regex = try NSRegularExpression(pattern: pattern)
+            let nsString = text as NSString
+            let results = regex.matches(in: text, range: NSRange(location: 0, length: nsString.length))
+            
+            for match in results {
+                let foundString = nsString.substring(with: match.range)
+                
+                // Heuristic filtering:
+                // Ignore likely years (e.g., 2020-2030) if they appear alone
+                if let num = Int(foundString), num >= 2000 && num <= 2030 {
+                    continue
+                }
+                return foundString
+            }
+        } catch {
+            print("Regex Error: \(error)")
+        }
+        return nil
     }
     
     private func resolveAppIcon(appName: String) -> NSImage? {
@@ -317,7 +333,6 @@ class NotificationMonitor: ObservableObject {
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
                 let roleStr = role as? String ?? "Unknown"
                 
-                // Exclude specific History Panel structures
                 if roleStr == "AXTable" || roleStr == "AXOutline" || roleStr == "AXList" {
                     isHistoryPanel = true
                     return
@@ -327,13 +342,11 @@ class NotificationMonitor: ObservableObject {
                 AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
                 let subroleStr = subrole as? String ?? ""
 
-                // 2. Text (Expanded Roles)
                 if roleStr == "AXStaticText" || roleStr == "AXTextArea" || roleStr == "AXTextField" {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
                         let t = text.lowercased()
-                        // Strict Header check
                         if t == "notification center" ||
                            t == "no notifications" ||
                            t == "do not disturb" ||

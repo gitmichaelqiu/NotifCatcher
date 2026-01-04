@@ -53,15 +53,16 @@ struct ContentView: View {
                     .font(.headline)
                 
                 HStack {
-                    Button("Send Single") {
-                        triggerSystemNotification(id: receivedCount + 1, delay: 0)
+                    Button("Send OTP") {
+                        let code = Int.random(in: 100000...999999)
+                        triggerSystemNotification(id: receivedCount + 1, delay: 0, body: "Your verification code is \(code)")
                     }
                     
                     Button("Burst (3x)") {
-                        // Send 3 notifications in quick succession to test race conditions
-                        triggerSystemNotification(id: receivedCount + 1, delay: 0.1)
-                        triggerSystemNotification(id: receivedCount + 2, delay: 1.5) // Overlaps with previous dismiss
-                        triggerSystemNotification(id: receivedCount + 3, delay: 4.0)
+                        let base = receivedCount
+                        triggerSystemNotification(id: base + 1, delay: 0.1)
+                        triggerSystemNotification(id: base + 2, delay: 1.2)
+                        triggerSystemNotification(id: base + 3, delay: 3.0)
                     }
                     
                     Button("Clear Log") {
@@ -70,7 +71,6 @@ struct ContentView: View {
                     }
                 }
                 
-                // Live Log View
                 ScrollView {
                     Text(testLog)
                         .font(.system(.caption, design: .monospaced))
@@ -86,11 +86,9 @@ struct ContentView: View {
             .padding(.bottom, 20)
         }
         .frame(minWidth: 400, minHeight: 450)
-        // CHANGED: Use onReceive for reliable stream handling
         .onReceive(monitor.notificationSubject) { newNotif in
             print("[ContentView] ✅ Received: \(newNotif.title)")
             
-            // Update Test Log
             let time = Date().formatted(.dateTime.hour().minute().second())
             testLog = "[\(time)] RECV: \(newNotif.title)\n" + testLog
             receivedCount += 1
@@ -105,13 +103,13 @@ struct ContentView: View {
         }
     }
     
-    // Helper to trigger system notifications via osascript
-    private func triggerSystemNotification(id: Int, delay: TimeInterval) {
+    private func triggerSystemNotification(id: Int, delay: TimeInterval, body: String? = nil) {
         let title = "Test Msg #\(id)"
-        let body = "This is test notification number \(id) sent via command."
+        let actualBody = body ?? "This is test notification number \(id) sent via command."
         
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
-            let script = "display notification \"\(body)\" with title \"\(title)\""
+            print("[Test] Triggering notification #\(id)")
+            let script = "display notification \"\(actualBody)\" with title \"\(title)\""
             let process = Process()
             process.launchPath = "/usr/bin/osascript"
             process.arguments = ["-e", script]
@@ -130,7 +128,6 @@ class FloatingNotificationManager: ObservableObject {
     private var panel: NSPanel?
     private var currentNotificationId: UUID?
     
-    // Config: Position logic for Top Right
     private let windowWidth: CGFloat = 450
     private let windowHeight: CGFloat = 200
     
@@ -149,7 +146,6 @@ class FloatingNotificationManager: ObservableObject {
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.acceptsMouseMovedEvents = true
         
-        // Start hidden completely
         p.orderOut(nil)
         p.ignoresMouseEvents = true
         p.alphaValue = 0
@@ -213,6 +209,9 @@ struct DynamicIslandContainer: View {
     @State private var isVisible: Bool = false
     @State private var eventMonitor: Any? = nil
     
+    // UI State for Copy Action
+    @State private var isCopied: Bool = false
+    
     private let springAnim = Animation.interpolatingSpring(mass: 0.5, stiffness: 200, damping: 18, initialVelocity: 0.5)
     
     private let startWidth: CGFloat = 20
@@ -268,29 +267,53 @@ struct DynamicIslandContainer: View {
                     }
                     
                     if isExpanded {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(notification.title)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                                .lineLimit(1)
+                        // Dynamic Layout: If OTP exists, adjust spacing
+                        HStack(alignment: .center) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(notification.title)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .lineLimit(1)
+                                
+                                if !notification.body.isEmpty {
+                                    Text(notification.body)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .lineLimit(notification.otpCode != nil ? 1 : 2) // Shorten text if OTP shown
+                                }
+                            }
                             
-                            if !notification.body.isEmpty {
-                                Text(notification.body)
-                                    .font(.system(size: 13))
-                                    .foregroundColor(.white.opacity(0.8))
-                                    .lineLimit(2)
+                            Spacer(minLength: 8)
+                            
+                            // OTP BUTTON
+                            if let otp = notification.otpCode {
+                                Button(action: {
+                                    copyOTP(otp)
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text(isCopied ? "Copied" : otp)
+                                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                    }
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 10)
+                                    .background(isCopied ? Color.green : Color.white.opacity(0.2))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(8)
+                                }
+                                .buttonStyle(.plain)
+                                .transition(.scale)
+                            } else {
+                                VStack(alignment: .trailing) {
+                                    Text("Now")
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                }
                             }
                         }
                         .transition(.opacity.combined(with: .move(edge: .top)))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    
-                    if isExpanded {
-                        VStack(alignment: .trailing) {
-                            Text("Now")
-                                .font(.caption2)
-                                .foregroundColor(.gray)
-                        }
                     }
                 }
                 .padding(.horizontal, 30)
@@ -328,6 +351,22 @@ struct DynamicIslandContainer: View {
                 NSEvent.removeMonitor(monitor)
                 self.eventMonitor = nil
             }
+        }
+    }
+    
+    private func copyOTP(_ code: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(code, forType: .string)
+        
+        withAnimation { isCopied = true }
+        
+        // Haptic Feedback (System)
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+        
+        // Dismiss after short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            dismissSequence(shouldCloseNative: true)
         }
     }
     
