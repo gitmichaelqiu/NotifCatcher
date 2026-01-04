@@ -4,139 +4,222 @@ import Combine
 
 // MARK: - Floating Window Manager
 class FloatingNotificationManager: ObservableObject {
-    private var panel: NSPanel?
-    private var currentNotificationId: UUID?
+    // Two separate windows to avoid blocking screen space between Island and Stash
+    private var activePanel: NSPanel?
+    private var stashPanel: NSPanel?
+    
+    @Published var activeNotification: CapturedNotification?
+    @Published var stashedNotifications: [CapturedNotification] = []
+    
     private var cancellables = Set<AnyCancellable>()
     private var settings: IslandSettingsManager
     
-    // Optimal Dimensions
-    private let baseWindowWidth: CGFloat = 450
-    private let windowHeight: CGFloat = 200
+    // Dimensions
+    private let activeWindowWidth: CGFloat = 450
+    private let activeWindowHeight: CGFloat = 200
+    private let stashWindowWidth: CGFloat = 60
+    private let stashWindowHeight: CGFloat = 500 // Tall strip for stack
     
     init(monitor: NotificationMonitor, settings: IslandSettingsManager) {
         self.settings = settings
         
+        // 1. Active Panel (The Island)
+        self.activePanel = createPanel(width: activeWindowWidth, height: activeWindowHeight)
+        
+        // 2. Stash Panel (The Stack on the right)
+        self.stashPanel = createPanel(width: stashWindowWidth, height: stashWindowHeight)
+        
+        // Subscribe to Monitor
+        monitor.notificationSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notif in
+                self?.present(notif)
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func createPanel(width: CGFloat, height: CGFloat) -> NSPanel {
         let p = NSPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = false
         p.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.acceptsMouseMovedEvents = true
-        p.orderOut(nil)
         p.ignoresMouseEvents = true
         p.alphaValue = 0
-        
-        self.panel = p
-        
-        monitor.notificationSubject
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] notif in
-                self?.showNotification(notif)
-            }
-            .store(in: &cancellables)
+        return p
     }
     
-    func showNotification(_ notification: CapturedNotification) {
-        guard let panel = self.panel else { return }
+    // MARK: - Logic
+    
+    func present(_ notification: CapturedNotification) {
+        // If we already have an active one, stash the OLD one (auto-stash logic)
+        // OR: Replace it? Let's replace it for now, user can manually stash.
+        // Actually, better UX: If user hasn't dealt with current, stash it to make room for new.
+        if let current = activeNotification {
+            withAnimation {
+                stashedNotifications.insert(current, at: 0)
+            }
+            updateStashWindow()
+        }
         
-        self.currentNotificationId = notification.id
+        self.activeNotification = notification
+        updateActiveWindow()
+    }
+    
+    func stashActive() {
+        guard let current = activeNotification else { return }
         
+        withAnimation {
+            stashedNotifications.insert(current, at: 0)
+            activeNotification = nil
+        }
+        
+        hideActiveWindow()
+        updateStashWindow()
+    }
+    
+    func unstash(id: UUID) {
+        guard let index = stashedNotifications.firstIndex(where: { $0.id == id }) else { return }
+        let item = stashedNotifications.remove(at: index)
+        
+        // If there is currently an active one, stash it back to index 0
+        if let current = activeNotification {
+            stashedNotifications.insert(current, at: 0)
+        }
+        
+        activeNotification = item
+        
+        updateStashWindow()
+        updateActiveWindow()
+    }
+    
+    func dismissActive() {
+        activeNotification = nil
+        hideActiveWindow()
+    }
+    
+    // MARK: - Window Updates
+    
+    private func updateActiveWindow() {
+        guard let panel = activePanel, let notif = activeNotification else { return }
+        
+        // Position Logic
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
-            
-            // RESTORED ORIGINAL LOGIC:
-            // Direct offset calculation without complex content-width math.
-            // This relies on the user adjusting 'rightPadding' to visually align the window
-            // containing the centered island content.
             let padding = CGFloat(settings.rightPadding)
-            
-            let xPos = visibleFrame.maxX - baseWindowWidth - padding
-            let yPos = visibleFrame.maxY - windowHeight
-            
-            panel.setFrame(NSRect(x: xPos, y: yPos, width: baseWindowWidth, height: windowHeight), display: true)
+            // Align visually based on settings
+            let xPos = visibleFrame.maxX - activeWindowWidth - padding
+            let yPos = visibleFrame.maxY - activeWindowHeight
+            panel.setFrame(NSRect(x: xPos, y: yPos, width: activeWindowWidth, height: activeWindowHeight), display: true)
         }
         
-        let rootView = DynamicIslandContainer(notification: notification, settings: settings) { [weak self] dismissedId in
-            self?.hidePanel(for: dismissedId)
-        }
+        let rootView = DynamicIslandContainer(
+            notification: notif,
+            settings: settings,
+            onStash: { [weak self] in self?.stashActive() },
+            onDismiss: { [weak self] _ in self?.dismissActive() }
+        )
         
-        let hostingView = NSHostingView(rootView: rootView)
-        hostingView.wantsLayer = true
-        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        let hosting = NSHostingView(rootView: rootView)
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
         
-        panel.contentView = hostingView
-        panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x, y: panel.frame.origin.y))
-        panel.alphaValue = 1
+        panel.contentView = hosting
         panel.ignoresMouseEvents = false
+        panel.alphaValue = 1
         panel.orderFrontRegardless()
     }
     
-    private func hidePanel(for id: UUID) {
-        guard id == self.currentNotificationId else { return }
-        guard let panel = self.panel else { return }
-        
+    private func hideActiveWindow() {
+        guard let panel = activePanel else { return }
         panel.ignoresMouseEvents = true
         panel.alphaValue = 0
         panel.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        panel.orderOut(nil)
+    }
+    
+    private func updateStashWindow() {
+        guard let panel = stashPanel else { return }
+        
+        if stashedNotifications.isEmpty {
+            panel.ignoresMouseEvents = true
+            panel.alphaValue = 0
+            panel.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+            return
+        }
+        
+        // Position Stash Panel on the far right edge
+        if let screen = NSScreen.main {
+            let visibleFrame = screen.visibleFrame
+            // Fixed small gap from right edge
+            let xPos = visibleFrame.maxX - stashWindowWidth - 5
+            // Start from top
+            let yPos = visibleFrame.maxY - stashWindowHeight
+            panel.setFrame(NSRect(x: xPos, y: yPos, width: stashWindowWidth, height: stashWindowHeight), display: true)
+        }
+        
+        let rootView = StashStackView(items: stashedNotifications) { [weak self] id in
+            self?.unstash(id: id)
+        }
+        
+        let hosting = NSHostingView(rootView: rootView)
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        
+        panel.contentView = hosting
+        panel.ignoresMouseEvents = false
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+    }
+    
+    // For Preview
+    func triggerPreview() {
+        let dummy = CapturedNotification(
+            title: "Preview",
+            body: "Adjusting settings...",
+            appName: "NotifCatcher",
+            icon: NSImage(systemSymbolName: "gear", accessibilityDescription: nil),
+            profileImage: nil,
+            otpCode: nil,
+            dismissAction: nil
+        )
+        present(dummy)
     }
 }
 
-// MARK: - Visual Island Component
+// MARK: - View: Active Island
 struct DynamicIslandContainer: View {
     let notification: CapturedNotification
     @ObservedObject var settings: IslandSettingsManager
+    var onStash: () -> Void
     var onDismiss: (UUID) -> Void
     
     @State private var isExpanded: Bool = false
-    @State private var isStashed: Bool = false
     @State private var isVisible: Bool = false
     @State private var isCopied: Bool = false
     @State private var eventMonitor: Any? = nil
     @State private var autoDismissTask: DispatchWorkItem?
     
     private let springAnim = Animation.interpolatingSpring(mass: 0.5, stiffness: 200, damping: 18, initialVelocity: 0.5)
-    
     private let startWidth: CGFloat = 20
     private let expandedHeight: CGFloat = 84
-    private let stashedSize: CGFloat = 46
-    
-    var currentWidth: CGFloat {
-        if isStashed { return stashedSize }
-        if isExpanded { return CGFloat(settings.width) }
-        return startWidth
-    }
-    
-    var currentHeight: CGFloat {
-        if isStashed { return stashedSize }
-        if isExpanded { return expandedHeight }
-        return 0
-    }
     
     var body: some View {
         VStack {
             ZStack(alignment: .top) {
-                // Background & Border
+                // Background
                 Group {
-                    LiquidMenubarShape(
-                        bottomRadius: isStashed ? 23 : (isExpanded ? 32 : 4),
-                        flareRadius: isStashed ? 8 : (isExpanded ? 15 : 2)
-                    )
-                    .fill(.black)
-                    .shadow(color: .black.opacity(0.4), radius: 15, x: 0, y: 8)
-                    
-                    LiquidMenubarShape(
-                        bottomRadius: isStashed ? 23 : (isExpanded ? 32 : 4),
-                        flareRadius: isStashed ? 8 : (isExpanded ? 15 : 2)
-                    )
-                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                    LiquidMenubarShape(bottomRadius: isExpanded ? 32 : 4, flareRadius: isExpanded ? 15 : 2)
+                        .fill(.black)
+                        .shadow(color: .black.opacity(0.4), radius: 15, x: 0, y: 8)
+                    LiquidMenubarShape(bottomRadius: isExpanded ? 32 : 4, flareRadius: isExpanded ? 15 : 2)
+                        .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
                 }
                 
                 // Content
@@ -145,21 +228,19 @@ struct DynamicIslandContainer: View {
                     ZStack {
                         if let profile = notification.profileImage {
                             Image(nsImage: profile).resizable().aspectRatio(contentMode: .fill)
-                                .frame(width: (isExpanded || isStashed) ? 38 : 0, height: (isExpanded || isStashed) ? 38 : 0)
+                                .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
                                 .clipShape(Circle())
                         } else if let appIcon = notification.icon {
                             Image(nsImage: appIcon).resizable().aspectRatio(contentMode: .fit)
-                                .frame(width: (isExpanded || isStashed) ? 38 : 0, height: (isExpanded || isStashed) ? 38 : 0)
+                                .frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
                                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         } else {
-                            Circle().fill(.gray)
-                                .frame(width: (isExpanded || isStashed) ? 38 : 0, height: (isExpanded || isStashed) ? 38 : 0)
+                            Circle().fill(.gray).frame(width: isExpanded ? 38 : 0, height: isExpanded ? 38 : 0)
                         }
                     }
-                    .opacity((isExpanded || isStashed) ? 1 : 0)
-                    .scaleEffect(isStashed ? 0.8 : 1.0)
+                    .opacity(isExpanded ? 1 : 0)
                     
-                    if isExpanded && !isStashed {
+                    if isExpanded {
                         HStack(alignment: .center) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(notification.title)
@@ -174,44 +255,33 @@ struct DynamicIslandContainer: View {
                                         .lineLimit(notification.otpCode != nil ? 1 : 2)
                                 }
                             }
-                            
                             Spacer(minLength: 8)
-                            
-                            // OTP Action Button
                             if let otp = notification.otpCode {
                                 Button(action: { copyOTP(otp) }) {
                                     HStack(spacing: 4) {
-                                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                                            .font(.system(size: 11, weight: .bold))
-                                        Text(isCopied ? "Copied" : otp)
-                                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc").font(.system(size: 11, weight: .bold))
+                                        Text(isCopied ? "Copied" : otp).font(.system(size: 13, weight: .bold, design: .monospaced))
                                     }
-                                    .padding(.vertical, 6)
-                                    .padding(.horizontal, 10)
-                                    .background(isCopied ? Color.green : Color.white.opacity(0.2))
-                                    .foregroundColor(.white)
-                                    .cornerRadius(8)
+                                    .padding(.vertical, 6).padding(.horizontal, 10)
+                                    .background(isCopied ? Color.green : Color.white.opacity(0.2)).foregroundColor(.white).cornerRadius(8)
                                 }
                                 .buttonStyle(.plain)
                             } else {
-                                VStack(alignment: .trailing) {
-                                    Text("Now").font(.caption2).foregroundColor(.gray)
-                                }
+                                VStack(alignment: .trailing) { Text("Now").font(.caption2).foregroundColor(.gray) }
                             }
                         }
-                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                        // FIX: Changed transition to .move(edge: .top) for better collapse animation
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
-                .padding(.horizontal, isStashed ? 4 : 30)
-                .padding(.top, isStashed ? 4 : 14)
-                .frame(height: currentHeight, alignment: .top)
+                .padding(.horizontal, 30)
+                .padding(.top, 14)
+                .frame(height: isExpanded ? expandedHeight : 0, alignment: .top)
             }
-            .frame(width: currentWidth, height: currentHeight)
+            .frame(width: isExpanded ? CGFloat(settings.width) : startWidth,
+                   height: isExpanded ? expandedHeight : 0)
             .opacity(isVisible ? 1 : 0)
-            .onTapGesture {
-                if isStashed { expandFromStash() } else { openApp() }
-            }
-            .onHover { if isStashed && $0 { expandFromStash() } }
+            .onTapGesture { openApp() }
             .padding(.top, 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -230,8 +300,16 @@ struct DynamicIslandContainer: View {
     private func setupScrollMonitor() {
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
             if let window = event.window, window.level.rawValue == Int(CGWindowLevelForKey(.mainMenuWindow)) + 2 {
-                if event.scrollingDeltaY < -2.0 && !isStashed { dismissSequence(shouldCloseNative: false); return nil }
-                if event.scrollingDeltaX > 2.0 && !isStashed { withAnimation(springAnim) { stashNotification() }; return nil }
+                // Swipe Up -> Dismiss
+                if event.scrollingDeltaY < -2.0 {
+                    dismissSequence(shouldCloseNative: false)
+                    return nil
+                }
+                // Swipe Right -> Stash
+                if event.scrollingDeltaX > 2.0 {
+                    stashSequence()
+                    return nil
+                }
             }
             return event
         }
@@ -240,27 +318,22 @@ struct DynamicIslandContainer: View {
     private func runPresentationSequence() {
         isVisible = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { withAnimation(springAnim) { isExpanded = true } }
-        let task = DispatchWorkItem { if !self.isStashed { self.dismissSequence(shouldCloseNative: false) } }
+        
+        let task = DispatchWorkItem { self.dismissSequence(shouldCloseNative: false) }
         self.autoDismissTask = task
         DispatchQueue.main.asyncAfter(deadline: .now() + settings.displayDuration, execute: task)
     }
     
-    private func stashNotification() {
+    private func stashSequence() {
         autoDismissTask?.cancel()
-        isStashed = true
-        isExpanded = false
-    }
-    
-    private func expandFromStash() {
-        isStashed = false
-        isExpanded = true
-        let task = DispatchWorkItem { if !self.isStashed { self.dismissSequence(shouldCloseNative: false) } }
-        self.autoDismissTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + settings.displayDuration, execute: task)
+        withAnimation(springAnim) { isExpanded = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            onStash() // Notify manager to move to stash stack
+        }
     }
     
     private func dismissSequence(shouldCloseNative: Bool) {
-        withAnimation(springAnim) { isExpanded = false; isStashed = false }
+        withAnimation(springAnim) { isExpanded = false }
         if shouldCloseNative { DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { notification.dismissAction?() } }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             withAnimation(.easeIn(duration: 0.2)) { isVisible = false }
@@ -289,7 +362,47 @@ struct DynamicIslandContainer: View {
     }
 }
 
-// MARK: - Shape
+// MARK: - View: Stash Stack (Pills)
+struct StashStackView: View {
+    let items: [CapturedNotification]
+    var onUnstash: (UUID) -> Void
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(items.prefix(5)) { item in // Limit to 5 visible pills
+                Button(action: { withAnimation { onUnstash(item.id) } }) {
+                    ZStack {
+                        Capsule()
+                            .fill(.black)
+                            .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
+                        
+                        Capsule()
+                            .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+                        
+                        if let icon = item.icon {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 22, height: 22)
+                                .clipShape(Circle())
+                        } else {
+                            Image(systemName: "bell.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.white)
+                        }
+                    }
+                    .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .padding(.top, 10)
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+}
+
+// MARK: - Shape (Existing)
 struct LiquidMenubarShape: Shape {
     var bottomRadius: CGFloat
     var flareRadius: CGFloat

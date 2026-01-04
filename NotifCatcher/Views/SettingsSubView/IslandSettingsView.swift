@@ -10,8 +10,8 @@ struct IslandSettingsView: View {
                 
                 SettingsSection("Preview") {
                     SettingsRow("Show Preview") {
-                        Button("Test Notification") {
-                            sendPreviewNotification()
+                        Button("Trigger Island") {
+                            windowManager.triggerPreview()
                         }
                     }
                 }
@@ -24,6 +24,8 @@ struct IslandSettingsView: View {
                         step: 10,
                         specifier: "%.0f px"
                     )
+                    // Live Preview Trigger
+                    .onChange(of: settings.width) { _ in windowManager.triggerPreview() }
                     
                     Divider()
                     
@@ -34,6 +36,8 @@ struct IslandSettingsView: View {
                         step: 1,
                         specifier: "%.0f px"
                     )
+                    // Live Preview Trigger
+                    .onChange(of: settings.rightPadding) { _ in windowManager.triggerPreview() }
                 }
                 
                 SettingsSection("Timing") {
@@ -51,6 +55,7 @@ struct IslandSettingsView: View {
                         Button("Restore Defaults") {
                             withAnimation {
                                 settings.resetToDefaults()
+                                windowManager.triggerPreview()
                             }
                         }
                     }
@@ -61,19 +66,6 @@ struct IslandSettingsView: View {
             .padding()
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-    }
-    
-    private func sendPreviewNotification() {
-        let dummy = CapturedNotification(
-            title: "Preview Message",
-            body: "Adjust settings to see changes live.",
-            appName: "NotifCatcher",
-            icon: NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: nil),
-            profileImage: nil,
-            otpCode: nil,
-            dismissAction: nil
-        )
-        windowManager.showNotification(dummy)
     }
     
     // Custom Full-Width Slider Row (Matched to DesktopRenamer)
