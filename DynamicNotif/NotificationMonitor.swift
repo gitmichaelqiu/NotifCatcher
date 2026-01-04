@@ -24,11 +24,10 @@ func observerCallback(_ observer: AXObserver, _ element: AXUIElement, _ notifica
     let monitor = Unmanaged<NotificationMonitor>.fromOpaque(refcon).takeUnretainedValue()
     
     let notifName = notification as String
-    print("[Monitor] ⚡️ AXObserver Callback Fired: \(notifName)")
+    print("[Monitor] ⚡️ AXObserver Callback Fired: \(notifName) (Thread: \(Thread.current.isMainThread ? "Main" : "Bg"))")
     
     DispatchQueue.global(qos: .userInteractive).async {
-        // Reduced delay to catch rapid updates, but kept slight pause for rendering
-        usleep(50000) // 50ms
+        usleep(100000) // 100ms delay to allow UI updates
         monitor.handleNewNotification(element: element)
     }
 }
@@ -62,33 +61,51 @@ class NotificationMonitor: ObservableObject {
             return
         }
         
-        guard let pid = findNotificationCenterPID() else {
-            print("❌ Could not find Notification Center PID")
-            DispatchQueue.main.async { self.errorMessage = "Could not find 'NotificationCenter'." }
-            return
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self = self else { return }
+            
+            guard let pid = self.findNotificationCenterPID() else {
+                print("❌ Could not find Notification Center PID")
+                DispatchQueue.main.async { self.errorMessage = "Could not find 'NotificationCenter'." }
+                return
+            }
+            
+            print("✅ Found Notification Center PID: \(pid)")
+            
+            let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+            
+            var newObserver: AXObserver?
+            guard AXObserverCreate(pid, observerCallback, &newObserver) == .success, let axObserver = newObserver else {
+                print("❌ Failed to create AXObserver")
+                return
+            }
+            
+            self.observer = axObserver
+            
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(axObserver), .defaultMode)
+            
+            let appElement = AXUIElementCreateApplication(pid)
+            
+            // 1. Standard Window Creation
+            AXObserverAddNotification(axObserver, appElement, kAXWindowCreatedNotification as CFString, selfPointer)
+            
+            // 2. Element Creation (Rapid banners / List items)
+            AXObserverAddNotification(axObserver, appElement, kAXCreatedNotification as CFString, selfPointer)
+            
+            // 3. Value Changed (Window Reuse: Text updates in existing banner)
+            AXObserverAddNotification(axObserver, appElement, kAXValueChangedNotification as CFString, selfPointer)
+            
+            // 4. Layout Changed (General updates)
+            AXObserverAddNotification(axObserver, appElement, kAXLayoutChangedNotification as CFString, selfPointer)
+            
+            // 5. Window Moved (Sliding animation completion might trigger this)
+            AXObserverAddNotification(axObserver, appElement, kAXWindowMovedNotification as CFString, selfPointer)
+            
+            DispatchQueue.main.async { self.isListening = true }
+            
+            print("[Monitor] 🚀 Background RunLoop Started for AXObserver")
+            CFRunLoopRun()
         }
-        
-        print("✅ Found Notification Center PID: \(pid)")
-        
-        let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        
-        guard AXObserverCreate(pid, observerCallback, &observer) == .success, let axObserver = observer else {
-            print("❌ Failed to create AXObserver")
-            return
-        }
-        
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(axObserver), .defaultMode)
-        
-        let appElement = AXUIElementCreateApplication(pid)
-        
-        // Listen for Window Creation (Standard banners)
-        AXObserverAddNotification(axObserver, appElement, kAXWindowCreatedNotification as CFString, selfPointer)
-        
-        // Listen for Element Creation (Rapid banners that might reuse windows or append to list)
-        // Fixed: Use kAXCreatedNotification instead of the incorrect kAXUIElementCreatedNotification
-        AXObserverAddNotification(axObserver, appElement, kAXCreatedNotification as CFString, selfPointer)
-        
-        DispatchQueue.main.async { self.isListening = true }
     }
     
     private func findNotificationCenterPID() -> pid_t? {
@@ -115,19 +132,24 @@ class NotificationMonitor: ObservableObject {
     }
     
     func handleNewNotification(element: AXUIElement) {
-        // Climb up to find the root window or container.
-        // If 'element' is just a text field that triggered 'Created', we need its parent window to find the other text/buttons.
+        // If the event came from the App element itself (common for LayoutChanged),
+        // we might need to scan the whole app or look for windows.
+        // For now, we try to get the parent window.
         let rootElement = getTopLevelParent(element)
         performScan(element: rootElement, retryCount: 0)
     }
     
     private func getTopLevelParent(_ element: AXUIElement) -> AXUIElement {
         var current = element
-        // Climb up max 5 levels to find a Window or top-level Group
         for _ in 0..<5 {
             var role: AnyObject?
             AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role)
+            // If we hit the Window, that's what we want.
             if let r = role as? String, r == "AXWindow" {
+                return current
+            }
+            // If we hit the Application, stop climbing (we can scan the app directly)
+            if let r = role as? String, r == "AXApplication" {
                 return current
             }
             
@@ -136,7 +158,6 @@ class NotificationMonitor: ObservableObject {
             if result != .success || parent == nil {
                 break
             }
-            // Use force cast carefully, knowing AX APIs return CFTypes compatible with AXUIElement
             current = parent as! AXUIElement
         }
         return current
@@ -145,14 +166,18 @@ class NotificationMonitor: ObservableObject {
     private func performScan(element: AXUIElement, retryCount: Int) {
         let content = scanAndDismiss(element)
         
-        // Success case: We found text
+        // Success case
         if !content.title.isEmpty || !content.body.isEmpty {
             
-            // DE-DUPLICATION CHECK
+            // DE-DUPLICATION
+            // We use content signature to avoid processing the same message multiple times
+            // (e.g. Created + LayoutChanged + ValueChanged all firing for one msg)
             let signature = "\(content.appName)|\(content.title)|\(content.body)"
             let now = Date()
+            
+            // If same content captured < 2.0s ago, ignore.
             if signature == lastCapturedSignature && now.timeIntervalSince(lastCapturedTime) < 2.0 {
-                print("[Monitor] ♻️ Duplicate detected within 2s. Ignoring.")
+                // print("[Monitor] ♻️ Duplicate content detected. Ignoring.")
                 return
             }
             
@@ -177,14 +202,13 @@ class NotificationMonitor: ObservableObject {
                     dismissAction: content.dismissAction
                 )
                 
-                print("[Monitor] 📤 Sending: \(finalNotification.title)")
+                print("[Monitor] 📤 Captured & Sending: \(finalNotification.title)")
                 notificationSubject.send(finalNotification)
             }
         }
         else {
             if retryCount < 3 {
-                // Short retry delay
-                DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
                     self.performScan(element: element, retryCount: retryCount + 1)
                 }
             }
@@ -262,7 +286,6 @@ class NotificationMonitor: ObservableObject {
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
             return NSImage(cgImage: cgImage, size: rect.size)
         } catch {
-            // print("Snapshot Capture Error: \(error)")
             return nil
         }
     }
@@ -294,6 +317,12 @@ class NotificationMonitor: ObservableObject {
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
                 let roleStr = role as? String ?? "Unknown"
                 
+                // Exclude specific History Panel structures
+                if roleStr == "AXTable" || roleStr == "AXOutline" || roleStr == "AXList" {
+                    isHistoryPanel = true
+                    return
+                }
+                
                 var subrole: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
                 let subroleStr = subrole as? String ?? ""
@@ -304,6 +333,7 @@ class NotificationMonitor: ObservableObject {
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
                         let t = text.lowercased()
+                        // Strict Header check
                         if t == "notification center" ||
                            t == "no notifications" ||
                            t == "do not disturb" ||
@@ -316,7 +346,6 @@ class NotificationMonitor: ObservableObject {
                     }
                 }
                 
-                // 3. App Name & Profile Photo Strategy
                 if roleStr == "AXImage" {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
@@ -358,7 +387,6 @@ class NotificationMonitor: ObservableObject {
                     }
                 }
 
-                // 4. Dismissal
                 if pendingDismissal == nil {
                     var actionNames: CFArray?
                     AXUIElementCopyActionNames(child, &actionNames)
@@ -395,8 +423,6 @@ class NotificationMonitor: ObservableObject {
         if t == "Notification Center" {
             return ("", "", "", nil, nil)
         }
-        
-        // Relaxed dismissal check: allow read-only
         
         let b = titles.count > 1 ? titles[1] : ""
         return (t, b, detectedAppName, candidateProfileElement, pendingDismissal)
