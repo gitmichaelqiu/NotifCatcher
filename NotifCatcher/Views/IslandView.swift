@@ -17,8 +17,10 @@ class FloatingNotificationManager: ObservableObject {
     // Dimensions
     private let activeWindowWidth: CGFloat = 450
     private let activeWindowHeight: CGFloat = 200
-    private let stashWindowWidth: CGFloat = 60
-    private let stashWindowHeight: CGFloat = 500 // Tall strip for stack
+    
+    // Increased stash window width to accommodate expanded square view (e.g. 150-200px)
+    private let stashWindowWidth: CGFloat = 180
+    private let stashWindowHeight: CGFloat = 600 // Tall strip for stack
     
     init(monitor: NotificationMonitor, settings: IslandSettingsManager) {
         self.settings = settings
@@ -60,8 +62,6 @@ class FloatingNotificationManager: ObservableObject {
     
     func present(_ notification: CapturedNotification) {
         // If we already have an active one, stash the OLD one (auto-stash logic)
-        // OR: Replace it? Let's replace it for now, user can manually stash.
-        // Actually, better UX: If user hasn't dealt with current, stash it to make room for new.
         if let current = activeNotification {
             withAnimation {
                 stashedNotifications.insert(current, at: 0)
@@ -85,17 +85,27 @@ class FloatingNotificationManager: ObservableObject {
         updateStashWindow()
     }
     
-    func unstash(id: UUID) {
+    // Completely remove from stash (Dismiss)
+    func removeFromStash(id: UUID) {
+        if let index = stashedNotifications.firstIndex(where: { $0.id == id }) {
+            withAnimation {
+                _ = stashedNotifications.remove(at: index)
+            }
+            updateStashWindow()
+        }
+    }
+    
+    // Move from stash to active island (Unstash) - NOT used in new design, but kept for logic completeness
+    // New design expands IN PLACE within the stash column.
+    func unstashToActive(id: UUID) {
         guard let index = stashedNotifications.firstIndex(where: { $0.id == id }) else { return }
         let item = stashedNotifications.remove(at: index)
         
-        // If there is currently an active one, stash it back to index 0
         if let current = activeNotification {
             stashedNotifications.insert(current, at: 0)
         }
         
         activeNotification = item
-        
         updateStashWindow()
         updateActiveWindow()
     }
@@ -165,7 +175,8 @@ class FloatingNotificationManager: ObservableObject {
         }
         
         let rootView = StashStackView(items: stashedNotifications) { [weak self] id in
-            self?.unstash(id: id)
+            // On Dismiss action from a capsule
+            self?.removeFromStash(id: id)
         }
         
         let hosting = NSHostingView(rootView: rootView)
@@ -193,7 +204,7 @@ class FloatingNotificationManager: ObservableObject {
     }
 }
 
-// MARK: - View: Active Island
+// MARK: - View: Active Island (Unchanged Logic, just Context)
 struct DynamicIslandContainer: View {
     let notification: CapturedNotification
     @ObservedObject var settings: IslandSettingsManager
@@ -207,17 +218,29 @@ struct DynamicIslandContainer: View {
     @State private var autoDismissTask: DispatchWorkItem?
     
     private let springAnim = Animation.interpolatingSpring(mass: 0.5, stiffness: 200, damping: 18, initialVelocity: 0.5)
+    
     private let startWidth: CGFloat = 20
     private let expandedHeight: CGFloat = 84
+    
+    var currentWidth: CGFloat {
+        if isExpanded { return CGFloat(settings.width) }
+        return startWidth
+    }
+    
+    var currentHeight: CGFloat {
+        if isExpanded { return expandedHeight }
+        return 0
+    }
     
     var body: some View {
         VStack {
             ZStack(alignment: .top) {
-                // Background
+                // Background & Border
                 Group {
                     LiquidMenubarShape(bottomRadius: isExpanded ? 32 : 4, flareRadius: isExpanded ? 15 : 2)
                         .fill(.black)
                         .shadow(color: .black.opacity(0.4), radius: 15, x: 0, y: 8)
+                    
                     LiquidMenubarShape(bottomRadius: isExpanded ? 32 : 4, flareRadius: isExpanded ? 15 : 2)
                         .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
                 }
@@ -255,22 +278,31 @@ struct DynamicIslandContainer: View {
                                         .lineLimit(notification.otpCode != nil ? 1 : 2)
                                 }
                             }
+                            
                             Spacer(minLength: 8)
+                            
+                            // OTP Action Button
                             if let otp = notification.otpCode {
                                 Button(action: { copyOTP(otp) }) {
                                     HStack(spacing: 4) {
-                                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc").font(.system(size: 11, weight: .bold))
-                                        Text(isCopied ? "Copied" : otp).font(.system(size: 13, weight: .bold, design: .monospaced))
+                                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text(isCopied ? "Copied" : otp)
+                                            .font(.system(size: 13, weight: .bold, design: .monospaced))
                                     }
-                                    .padding(.vertical, 6).padding(.horizontal, 10)
-                                    .background(isCopied ? Color.green : Color.white.opacity(0.2)).foregroundColor(.white).cornerRadius(8)
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 10)
+                                    .background(isCopied ? Color.green : Color.white.opacity(0.2))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(8)
                                 }
                                 .buttonStyle(.plain)
                             } else {
-                                VStack(alignment: .trailing) { Text("Now").font(.caption2).foregroundColor(.gray) }
+                                VStack(alignment: .trailing) {
+                                    Text("Now").font(.caption2).foregroundColor(.gray)
+                                }
                             }
                         }
-                        // FIX: Changed transition to .move(edge: .top) for better collapse animation
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
@@ -278,10 +310,11 @@ struct DynamicIslandContainer: View {
                 .padding(.top, 14)
                 .frame(height: isExpanded ? expandedHeight : 0, alignment: .top)
             }
-            .frame(width: isExpanded ? CGFloat(settings.width) : startWidth,
-                   height: isExpanded ? expandedHeight : 0)
+            .frame(width: currentWidth, height: currentHeight)
             .opacity(isVisible ? 1 : 0)
-            .onTapGesture { openApp() }
+            .onTapGesture {
+                openApp()
+            }
             .padding(.top, 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -300,6 +333,10 @@ struct DynamicIslandContainer: View {
     private func setupScrollMonitor() {
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
             if let window = event.window, window.level.rawValue == Int(CGWindowLevelForKey(.mainMenuWindow)) + 2 {
+                // Check if we are inside THIS specific island window (frame check)
+                // Actually, local monitor catches events for the application. We need to filter for the window under cursor.
+                // But for now, since active island is unique, this works.
+                
                 // Swipe Up -> Dismiss
                 if event.scrollingDeltaY < -2.0 {
                     dismissSequence(shouldCloseNative: false)
@@ -362,43 +399,146 @@ struct DynamicIslandContainer: View {
     }
 }
 
-// MARK: - View: Stash Stack (Pills)
+// MARK: - View: Stash Stack (Expanded Capsules)
 struct StashStackView: View {
     let items: [CapturedNotification]
-    var onUnstash: (UUID) -> Void
+    var onDismiss: (UUID) -> Void
     
     var body: some View {
-        VStack(spacing: 8) {
-            ForEach(items.prefix(5)) { item in // Limit to 5 visible pills
-                Button(action: { withAnimation { onUnstash(item.id) } }) {
-                    ZStack {
-                        Capsule()
-                            .fill(.black)
-                            .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
-                        
-                        Capsule()
-                            .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
-                        
-                        if let icon = item.icon {
-                            Image(nsImage: icon)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 22, height: 22)
-                                .clipShape(Circle())
-                        } else {
-                            Image(systemName: "bell.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(.white)
-                        }
-                    }
-                    .frame(width: 36, height: 36)
-                }
-                .buttonStyle(.plain)
-                .transition(.scale.combined(with: .opacity))
+        VStack(alignment: .trailing, spacing: 10) {
+            ForEach(items.prefix(5)) { item in // Limit to 5
+                StashCapsuleView(item: item, onDismiss: onDismiss)
             }
         }
         .padding(.top, 10)
-        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(.trailing, 10) // Right padding for the stack
+        .frame(maxWidth: .infinity, alignment: .topTrailing)
+    }
+}
+
+struct StashCapsuleView: View {
+    let item: CapturedNotification
+    var onDismiss: (UUID) -> Void
+    
+    @State private var isExpanded: Bool = false
+    @State private var isVisible: Bool = true
+    
+    private let pillSize: CGFloat = 36
+    private let expandedSize: CGFloat = 140 // Square size
+    
+    var body: some View {
+        if isVisible {
+            ZStack {
+                // Background
+                RoundedRectangle(cornerRadius: isExpanded ? 16 : 18, style: .continuous)
+                    .fill(.black)
+                    .shadow(color: .black.opacity(0.3), radius: 6, x: 0, y: 3)
+                
+                RoundedRectangle(cornerRadius: isExpanded ? 16 : 18, style: .continuous)
+                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                
+                // Content
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            // Icon (Top Left)
+                            iconView
+                                .frame(width: 28, height: 28)
+                            
+                            Spacer()
+                            
+                            // Time (Top Right)
+                            Text("Now")
+                                .font(.caption2)
+                                .foregroundColor(.gray)
+                        }
+                        
+                        Text(item.title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        
+                        if !item.body.isEmpty {
+                            Text(item.body)
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.7))
+                                .lineLimit(3)
+                        }
+                    }
+                    .padding(12)
+                    .transition(.opacity)
+                } else {
+                    // Collapsed Icon
+                    iconView
+                        .frame(width: 22, height: 22)
+                        .transition(.scale)
+                }
+            }
+            .frame(width: isExpanded ? expandedSize : pillSize,
+                   height: isExpanded ? expandedSize : pillSize)
+            .onTapGesture {
+                if isExpanded {
+                    openApp()
+                } else {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        isExpanded = true
+                    }
+                }
+            }
+            // Gestures for Expanded State
+            .gesture(
+                DragGesture(minimumDistance: 10)
+                    .onEnded { value in
+                        guard isExpanded else { return }
+                        
+                        // Swipe Right -> Collapse (Re-stash)
+                        if value.translation.width > 20 {
+                            withAnimation(.spring()) {
+                                isExpanded = false
+                            }
+                        }
+                        // Swipe Up -> Dismiss
+                        else if value.translation.height < -20 {
+                            dismissItem()
+                        }
+                    }
+            )
+        }
+    }
+    
+    private var iconView: some View {
+        Group {
+            if let icon = item.icon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(Circle())
+            } else {
+                Image(systemName: "bell.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(.white)
+            }
+        }
+    }
+    
+    private func openApp() {
+        let workspace = NSWorkspace.shared
+        if let path = workspace.fullPath(forApplication: item.appName) {
+            let url = URL(fileURLWithPath: path)
+            workspace.open(url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+        } else {
+            workspace.launchApplication(item.appName)
+        }
+        dismissItem()
+    }
+    
+    private func dismissItem() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            isVisible = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            onDismiss(item.id)
+        }
     }
 }
 
