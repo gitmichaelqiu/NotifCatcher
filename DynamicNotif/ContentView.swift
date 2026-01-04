@@ -296,7 +296,8 @@ struct DynamicIslandContainer: View {
                     // FIXED CHECK: Negative DeltaY means upward swipe/scroll in logs provided
                     if event.scrollingDeltaY < -2.0 {
                         print("[GestureDebug] Dismissing due to swipe up (Manual Dismiss)")
-                        dismissSequence(shouldCloseNative: true)
+                        // SWIPE UP: Dismiss Island, but DO NOT close native notification
+                        dismissSequence(shouldCloseNative: false)
                         return nil // Consume the event
                     }
                 }

@@ -115,9 +115,6 @@ class NotificationMonitor: ObservableObject {
                     profileImg = await captureSnapshot(of: profileElement)
                 }
                 
-                // IMPORTANT: We do NOT execute dismissAction here anymore.
-                // We pass it to the UI to handle manually.
-                
                 let finalNotification = CapturedNotification(
                     title: content.title,
                     body: content.body,
@@ -242,6 +239,15 @@ class NotificationMonitor: ObservableObject {
                 AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
                 let roleStr = role as? String ?? "Unknown"
                 
+                // HEURISTIC: Structural Exclusion for History Panel
+                // The history view typically contains Tables, Outlines, or Lists.
+                // Banners are usually simple Groups.
+                if roleStr == "AXTable" || roleStr == "AXOutline" || roleStr == "AXList" {
+                    print("[Filter] Detected History Panel structure (Role: \(roleStr)). Ignoring.")
+                    isHistoryPanel = true
+                    return
+                }
+                
                 var subrole: AnyObject?
                 AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subrole)
                 let subroleStr = subrole as? String ?? ""
@@ -251,12 +257,15 @@ class NotificationMonitor: ObservableObject {
                     var val: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &val)
                     if let text = val as? String, !text.isEmpty {
-                        // HEURISTIC: Detect Notification Center History Panel
-                        if text == "Notification Center" ||
-                           text == "No Notifications" ||
-                           text == "Do Not Disturb" ||
-                           text == "Edit Widgets" ||
-                           text == "Widgets" {
+                        // HEURISTIC: Detect Notification Center History Panel Headers/Buttons
+                        let t = text.lowercased()
+                        if t == "notification center" ||
+                           t == "no notifications" ||
+                           t == "do not disturb" ||
+                           t == "edit widgets" ||
+                           t == "widgets" ||
+                           t.contains("clear all") {
+                            print("[Filter] Detected History Panel text: '\(text)'. Ignoring.")
                             isHistoryPanel = true
                             return
                         }
@@ -275,6 +284,7 @@ class NotificationMonitor: ObservableObject {
                     } else {
                         if candidateProfileElement == nil { candidateProfileElement = child }
                     }
+                    
                     if !descStr.isEmpty { if detectedAppName == "System" { detectedAppName = descStr } }
                 }
                 
@@ -282,6 +292,14 @@ class NotificationMonitor: ObservableObject {
                     var desc: AnyObject?
                     AXUIElementCopyAttributeValue(child, kAXDescriptionAttribute as CFString, &desc)
                     let descStr = (desc as? String) ?? ""
+                    
+                    // HEURISTIC: "Clear" buttons are strong indicators of history view
+                    if descStr == "Clear" || descStr == "Clear All" {
+                        print("[Filter] Detected History Panel button: '\(descStr)'. Ignoring.")
+                        isHistoryPanel = true
+                        return
+                    }
+                    
                     if !descStr.isEmpty && !["Close", "Clear", "Actions", "Reply", "Mute"].contains(descStr) {
                          if detectedAppName == "System" { detectedAppName = descStr }
                     }
@@ -336,11 +354,15 @@ class NotificationMonitor: ObservableObject {
 
         let t = titles.first ?? "New Notification"
         if t == "Notification Center" {
+            print("[Filter] Title is 'Notification Center'. Ignoring.")
             return ("", "", "", nil, nil)
         }
         
-        // IMPORTANT: We return the dismissal block, but we DO NOT execute it here.
-        // It is up to the UI to execute it based on user interaction (swipe vs timeout).
+        if pendingDismissal == nil {
+            print("[Filter] No dismissal action found (Persistent Window?). Ignoring.")
+            return ("", "", "", nil, nil)
+        }
+        
         let b = titles.count > 1 ? titles[1] : ""
         return (t, b, detectedAppName, candidateProfileElement, pendingDismissal)
     }
