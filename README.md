@@ -1,5 +1,3 @@
-# NotfiCatcher
-
 <h1 align="center">
   <img src="./NotifCatcher/Resources/NotifCatcherIcon_Default.png" width="25%" alt=""/>  
   <p></p>
